@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data files (now loaded via DAL from database)
+data/
+
+# OS files
+.DS_Store
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints/
