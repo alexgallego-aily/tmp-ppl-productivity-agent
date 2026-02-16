@@ -1,14 +1,110 @@
 # PPL Manager Analytics
 
-Per-manager People KPIs + MNS domain KPIs. Interactive CLI for data exploration and prototyping the AI agent workflow.
+> People KPIs x Business KPIs (M&S, GTM, ...) → cross-domain priorities for managers.
+> Agentic loop + MCP tools. Batch monthly + superagent on-demand. Domain-extensible.
+
+This repo is the **data exploration and prototyping layer**. The functions here become MCP tools; the interactive CLI simulates the agent workflow.
 
 ---
 
-## Architecture
+## Agent Architecture
+
+```
+                        ┌──────────────────────────────────────┐
+                        │            aily-mcp repo              │
+                        │                                      │
+                        │  MCP SERVER          SKILL            │
+                        │  aily-mcp-ppl        ppl_productivity │
+                        │                                      │
+                        │  · find_manager      workflow +       │
+                        │  · get_profile       analysis rules + │
+                        │  · get_manager_kpis  priority format +│
+                        │  · get_kpi_drivers   privacy rules    │
+                        │  · detect_cross_                      │
+                        │    domain_correl.                     │
+                        └──────────┬──────────────┬────────────┘
+                                   │              │
+                                   │  ┌────────┐  │
+                                   └──┤  LLM   ├──┘
+                                      └───┬────┘
+                                          │
+                        ┌─────────────────┼─────────────────┐
+                        │                                   │
+           ┌────────────▼──────────┐       ┌───────────────▼────────────┐
+           │  BATCH (monthly)       │       │  SUPERAGENT (on-demand)     │
+           │                        │       │                            │
+           │  aily-agent-lab:       │       │  Loads same skill +        │
+           │  TeamProductivity      │       │  same tools                │
+           │  Agent.run()           │       │                            │
+           │    → LLM loop          │       │  User question →           │
+           │    → PrioritiesOutput  │       │    → LLM loop              │
+           │    → BillboardTemplates│       │    → text response         │
+           │    → deploy_agent()    │       │                            │
+           │    → Frontend          │       │                            │
+           └────────────────────────┘       └────────────────────────────┘
+```
+
+Same tools, same skill, same LLM. Only the output wrapper differs.
+
+### Execution
+
+**Batch:**
+```
+For each manager:
+  1. Agent.run() → MCPConfig(aily-mcp-ppl + aily-mcp-skills)
+  2. LLM loads skill → calls get_manager_kpis → sees flagged KPIs
+     → calls get_kpi_drivers → calls detect_cross_domain_correlations
+     → synthesizes 1-4 priorities (PrioritiesOutput)
+  3. Agent wraps in BillboardTemplates → deploy_agent() → DB → Frontend
+```
+
+**Superagent:**
+```
+User: "Manager abc123 has high attrition. Is it affecting operations?"
+  1. Superagent loads ppl_productivity skill via get_skills()
+  2. Same LLM loop, same tools
+  3. Returns text (not templates)
+```
+
+### What goes where
+
+| Component | Repo | Purpose |
+|---|---|---|
+| MCP tools + SQL + preprocessing | `aily-mcp` (`packages/external/ppl/`) | Data & analysis tools the LLM calls |
+| Skill (SKILL.md) | `aily-mcp` (`packages/internal/skills/.../ppl_productivity/`) | Single source of truth for the agent brain |
+| Agent class + templates | `aily-agent-lab` (`packages/aily-agent-team-productivity/`) | BaseAgent subclass, BillboardTemplates, deploy_agent() |
+| **This repo (ppl)** | `ppl/` | **Data exploration + prototyping** — functions that become MCP tools |
+
+### Tools — what the LLM sees vs what runs inside
+
+The LLM calls tools by name + params. Everything else (SQL, mappings, preprocessing) is internal.
+
+| Tool | LLM calls | What runs inside (hidden from LLM) |
+|------|-----------|----------------------------------------------|
+| `find_manager` | `(geo, level, location, ...)` | `find_manager.sql` → Dal → candidates |
+| `get_manager_profile` | `(manager_code)` | `manager_profile.sql` + `manager_active_teams.sql` → kpi_mapping detection |
+| `get_manager_kpis` | `(manager_code, snapshot_date)` | `manager_team_kpis.sql` + `manager_domain_kpis.sql` → Dal → flags |
+| `get_kpi_drivers` | `(manager_code, kpi_name)` | drill-down SQL → anonymized breakdown |
+| `detect_cross_domain_correlations` | `(manager_code)` | statistical correlation engine |
+
+### Adding a new domain
+
+Adding GTM, Finance, R&D... = SQL + config + mapping. Tool signatures don't change.
+
+```
+1. Add sql/gtm/pipeline_kpis.sql
+2. Add the BU mapping to config.py (KPI_MAPPING_RULES + KPI_MAPPING_LABELS)
+3. Update function_to_domain mappings
+4. Done. get_manager_kpis auto-detects the new domain.
+```
+
+---
+
+## This repo: data layer + interactive CLI
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  Interactive CLI                     │  ← You (or QA) exploring data
+│                  Interactive CLI                     │  ← You simulating the agent
 │                    main.py                           │
 └──────────────┬──────────────────────┬───────────────┘
                │                      │
@@ -29,12 +125,6 @@ Per-manager People KPIs + MNS domain KPIs. Interactive CLI for data exploration 
 ┌──────────────▼──────────┐
 │   SQL queries            │
 │   sql/*.sql              │
-│                          │
-│   find_manager.sql       │
-│   manager_profile.sql    │
-│   manager_active_teams   │
-│   manager_team_kpis.sql  │
-│   manager_domain_kpis    │
 └──────────────┬──────────┘
                │
 ┌──────────────▼──────────┐
@@ -42,9 +132,9 @@ Per-manager People KPIs + MNS domain KPIs. Interactive CLI for data exploration 
 └─────────────────────────┘
 ```
 
-### From CLI to Agent
+### From CLI to MCP tool
 
-The interactive CLI simulates what an AI agent would do. Each CLI command maps 1:1 to a future MCP tool:
+Each CLI command maps 1:1 to a future MCP tool:
 
 | CLI command | Python function | Future MCP tool |
 |---|---|---|
@@ -63,7 +153,7 @@ The functions in `src/data.py` return structured dicts/DataFrames — ready for 
 # Python 3.11
 uv sync
 
-# Environment variables (copy and fill)
+# Environment variables
 cp .env.example .env
 # Required: AILY_CLOUD_PROVIDER, AILY_TENANT, AILY_ENV, AWS_REGION, AWS_PROFILE
 ```
@@ -71,8 +161,6 @@ cp .env.example .env
 ---
 
 ## Interactive CLI
-
-The recommended way to explore. Start with:
 
 ```bash
 uv run python main.py
@@ -148,6 +236,66 @@ Two sources are combined automatically:
 
 ---
 
+## KPI Mapping: how domain detection works
+
+When a manager's profile is loaded, the system auto-detects which MNS domain (Business Unit) is relevant. This mapping connects PPL managers to their MNS KPIs.
+
+### Current approach: heuristic keyword rules
+
+Defined in `src/config.py`:
+
+```python
+KPI_MAPPING_RULES = [
+    ("general medicines", "MSLT_GENERAL_MEDICINE"),
+    ("general medicine",  "MSLT_GENERAL_MEDICINE"),
+    ("genmed",            "MSLT_GENERAL_MEDICINE"),
+    ("vaccines",          "MSLT_VACCINES"),
+    ("vaccine",           "MSLT_VACCINES"),
+    ("specialty care",    "MSLT_SPECIALTY_CARE"),
+    ("speciality care",   "MSLT_SPECIALTY_CARE"),
+]
+
+KPI_MAPPING_LABELS = {
+    "MSLT_GENERAL_MEDICINE": "General Medicine",
+    "MSLT_VACCINES":         "Vaccines",
+    "MSLT_SPECIALTY_CARE":   "Specialty Care",
+}
+```
+
+The `suggest_kpi_mapping()` function concatenates all profile fields (GBU_Level_1/2/3, Level_02/03/04_From_Top, job_unit) into a single string and scans it for keywords. First match wins.
+
+**To add a new domain:**
+
+1. Add keyword rules to `KPI_MAPPING_RULES` in `src/config.py`
+2. Add the human-readable label to `KPI_MAPPING_LABELS`
+3. Add the BU → `business_unit_label` mapping to `_KPI_MAPPING_BU` in `src/data.py`
+4. The rest (SQL, cluster resolution, dashboards) works automatically
+
+**To modify an existing mapping:**
+
+Edit `KPI_MAPPING_RULES` — rules are evaluated top-to-bottom, first match wins. Put more specific keywords before generic ones.
+
+### Planned: lookup table integration
+
+There is an existing table with pre-computed mappings:
+
+```
+supervisory_organization_level_02_from_the_top | business_title | ... | kpi_mapping
+Manufacturing and Supply (Brendan O'CALLAGHAN)  | Head of GM...  | ... | MSLT_GENERAL_MEDICINE
+Manufacturing and Supply (Brendan O'CALLAGHAN)  | Global Head... | ... | MSLT_VACCINES
+```
+
+**TODO**: Replace the heuristic rules with a lookup against this table. The integration plan:
+
+1. Load the mapping table via DAL during `get_manager_profile()`
+2. Match on manager attributes (Level_02_From_Top, management_level, geo_code, etc.)
+3. Fall back to the current heuristic rules if no table match is found
+4. This eliminates ambiguity and supports mappings that keywords can't detect (e.g. managers whose function doesn't mention the BU name)
+
+Until the table is integrated, use `set-kpi <code>` in the CLI (or pass `kpi_mapping` to the function) to override when auto-detection is wrong.
+
+---
+
 ## Direct commands (non-interactive)
 
 ```bash
@@ -170,9 +318,9 @@ ppl/
 ├── main.py                     # Entry point (interactive CLI + direct commands)
 ├── src/
 │   ├── __init__.py             # Public API
-│   ├── data.py                 # Data loading functions (tool-ready)
-│   ├── plots.py                # Plotly dashboards
-│   ├── config.py               # KPI definitions, mapping rules, palettes
+│   ├── data.py                 # Data loading functions (future MCP tools)
+│   ├── plots.py                # Plotly dashboards (PPL + Domain)
+│   ├── config.py               # KPI panel defs, mapping rules, palettes
 │   └── paths.py                # Path constants
 ├── sql/
 │   ├── find_manager.sql        # Manager lookup by descriptive filters
@@ -184,9 +332,7 @@ ppl/
 └── pyproject.toml
 ```
 
-## KPIs tracked
-
-### PPL Team KPIs (18 panels)
+## PPL KPIs tracked (18 panels)
 
 | Category | Metrics |
 |---|---|
@@ -199,6 +345,6 @@ ppl/
 | Risk | High Retention Risk %, Critical Flight Risk % |
 | Management Structure | Managers in Team %, Avg Span of Control |
 
-### Domain KPIs (MNS)
+## Domain KPIs (MNS)
 
 Dynamically loaded from `mns_kpi_facts` based on detected `kpi_mapping`. Includes all available KPI codes for the Business Unit + Country Organisation KPIs matching the manager's countries.
