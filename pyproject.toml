@@ -3,10 +3,14 @@ name = "ppl"
 version = "0.1.0"
 description = "PPL Productivity Analytics — Manager KPIs × Business KPIs"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11, <3.12"
 dependencies = [
-    "aily-data-access-layer>=2",
+    "aily-data-access-layer>=2.34.0",
     "aily-py-commons>=1.6.9",
-    "pandas>=3.0.0",
-    "plotly>=6.5.2",
+    "pandas>=2.0.0",
+    "plotly>=5.18.0",
+    "python-dotenv>=1.0.0",
 ]
+
+[tool.uv]
+index-url = "https://dl.cloudsmith.io/PRBlnvv3GHFM3KDl/ailylabs/pip/python/simple/"

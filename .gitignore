@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Environment variables (local only, never commit)
+.env
+
 # Data files (now loaded via DAL from database)
 data/
 

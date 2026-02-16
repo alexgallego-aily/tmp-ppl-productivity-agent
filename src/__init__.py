@@ -1,20 +1,34 @@
 """
-src — Manager Productivity Analytics.
+src — Manager Team Analytics.
 
-Data is loaded from the database via Aily's Data Access Layer (DAL).
-SQL queries live in the ``sql/`` directory at the project root.
-
-Usage:
-    from src import load_all, plot_global_dashboard, plot_manager_dashboard
+Functions here serve as building blocks for:
+  - Interactive CLI (main.py)
+  - Future MCP tools (aily-mcp-ppl)
 """
 
+# ── Data loading & analysis ──────────────────────────────────────
 from .data import (
-    get_latest,
-    get_manager_mns_kpis,
-    load_all,
-    load_data,
-    load_mns_kpis,
+    find_manager,
+    get_manager_profile,
+    get_available_mns_clusters,
+    load_manager_team_kpis,
+    get_manager_summary,
+    load_manager_domain_kpis,
+    get_domain_summary,
+    resolve_business_unit,
 )
-from .plots import plot_global_dashboard, plot_manager_dashboard
-from .config import BENCHMARK_METRICS
-from .mapping import enrich_people, enrich_mns, merge_mns_people
+
+# ── Plotly visualizations ────────────────────────────────────────
+from .plots import (
+    plot_manager_team_dashboard,
+    plot_domain_kpi_dashboard,
+)
+
+# ── Config & mapping rules ───────────────────────────────────────
+from .config import (
+    TEAM_KPI_PANELS,
+    TEAM_PALETTE,
+    KPI_MAPPING_LABELS,
+    KPI_MAPPING_RULES,
+    suggest_kpi_mapping,
+)

@@ -1,256 +1,204 @@
-# Productivity Agent — Architecture
+# PPL Manager Analytics
 
-> People KPIs × Business KPIs (M&S, GTM, ...) → cross-domain priorities for managers.
-> Agentic loop + MCP tools. Batch monthly + superagent on-demand. Domain-extensible.
-
----
-
-## How it works
-
-```
-                        ┌──────────────────────────────────────┐
-                        │            aily-mcp repo              │
-                        │                                      │
-                        │  MCP SERVER          SKILL            │
-                        │  aily-mcp-ppl        ppl_productivity │
-                        │                                      │
-                        │  · get_manager_kpis  workflow +       │
-                        │  · get_kpi_drivers   analysis rules + │
-                        │  · detect_cross_     priority format +│
-                        │    domain_correl.    privacy rules    │
-                        └──────────┬──────────────┬────────────┘
-                                   │              │
-                                   │  ┌────────┐  │
-                                   └──┤  LLM   ├──┘
-                                      └───┬────┘
-                                          │
-                        ┌─────────────────┼─────────────────┐
-                        │                                   │
-           ┌────────────▼──────────┐       ┌───────────────▼────────────┐
-           │  BATCH (monthly)       │       │  SUPERAGENT (on-demand)     │
-           │                        │       │                            │
-           │  aily-agent-lab:       │       │  Loads same skill +        │
-           │  TeamProductivity      │       │  same tools                │
-           │  Agent.run()           │       │                            │
-           │    → LLM loop          │       │  User question →           │
-           │    → PrioritiesOutput  │       │    → LLM loop              │
-           │    → BillboardTemplates│       │    → text response         │
-           │    → deploy_agent()    │       │                            │
-           │    → Frontend          │       │                            │
-           └────────────────────────┘       └────────────────────────────┘
-```
-
-Same tools, same skill, same LLM. Only the output wrapper differs.
+Per-manager People KPIs + MNS domain KPIs. Interactive CLI for data exploration and prototyping the AI agent workflow.
 
 ---
 
-## Execution
-
-### Batch
+## Architecture
 
 ```
-For each manager:
-  1. Agent.run() → MCPConfig(aily-mcp-ppl + aily-mcp-skills)
-  2. LLM loads skill → calls get_manager_kpis → sees flagged KPIs
-     → calls get_kpi_drivers → calls detect_cross_domain_correlations
-     → synthesizes 1-4 priorities (PrioritiesOutput)
-  3. Agent wraps in BillboardTemplates → deploy_agent() → DB → Frontend
+┌─────────────────────────────────────────────────────┐
+│                  Interactive CLI                     │  ← You (or QA) exploring data
+│                    main.py                           │
+└──────────────┬──────────────────────┬───────────────┘
+               │                      │
+┌──────────────▼──────────┐  ┌────────▼───────────────┐
+│   Python functions       │  │   Plotly dashboards    │
+│   src/data.py            │  │   src/plots.py         │
+│                          │  │                        │
+│   find_manager()         │  │   plot_manager_team_   │
+│   get_manager_profile()  │  │     dashboard()        │
+│   load_manager_team_     │  │   plot_domain_kpi_     │
+│     kpis()               │  │     dashboard()        │
+│   load_manager_domain_   │  │                        │
+│     kpis()               │  │                        │
+│   get_available_mns_     │  │                        │
+│     clusters()           │  │                        │
+└──────────────┬──────────┘  └────────────────────────┘
+               │
+┌──────────────▼──────────┐
+│   SQL queries            │
+│   sql/*.sql              │
+│                          │
+│   find_manager.sql       │
+│   manager_profile.sql    │
+│   manager_active_teams   │
+│   manager_team_kpis.sql  │
+│   manager_domain_kpis    │
+└──────────────┬──────────┘
+               │
+┌──────────────▼──────────┐
+│   Aily DAL (Redshift)    │
+└─────────────────────────┘
 ```
+
+### From CLI to Agent
+
+The interactive CLI simulates what an AI agent would do. Each CLI command maps 1:1 to a future MCP tool:
+
+| CLI command | Python function | Future MCP tool |
+|---|---|---|
+| `find --geo Germany --level "Exec Level 2"` | `find_manager(geo_code="Germany", management_level="Exec Level 2")` | `find_manager` |
+| `select 0` / `profile <hash>` | `get_manager_profile(manager_code)` | `get_manager_profile` |
+| `clusters` | `get_available_mns_clusters(business_unit)` | `get_available_clusters` |
+| `kpis` | `load_manager_team_kpis()` + `load_manager_domain_kpis()` | `get_manager_kpis` |
+
+The functions in `src/data.py` return structured dicts/DataFrames — ready for MCP tool wrapping.
+
+---
+
+## Setup
 
 ```bash
-uv run aily-agent-team-productivity team-productivity-agent-publish \
-    --snapshot-date 2024-12-01 --parallel --workers 5
-```
+# Python 3.11
+uv sync
 
-### Superagent
-
-```
-User: "Manager abc123 has high attrition. Is it affecting operations?"
-  1. Superagent loads ppl_productivity skill via get_skills()
-  2. Same LLM loop, same tools
-  3. Returns text (not templates)
+# Environment variables (copy and fill)
+cp .env.example .env
+# Required: AILY_CLOUD_PROVIDER, AILY_TENANT, AILY_ENV, AWS_REGION, AWS_PROFILE
 ```
 
 ---
 
-## What goes where
+## Interactive CLI
 
-### `aily-mcp` — MCP server + skill
+The recommended way to explore. Start with:
 
-```
-packages/external/ppl/
-├── src/aily_mcp_ppl/
-│   ├── main.py                      # Server entry
-│   ├── tools/
-│   │   ├── kpis.py                  #   get_manager_kpis
-│   │   ├── drivers.py               #   get_kpi_drivers
-│   │   └── correlations.py          #   detect_cross_domain_correlations
-│   ├── sql/
-│   │   ├── ppl/                     #   People KPI queries
-│   │   ├── mns/                     #   M&S queries
-│   │   └── .../                     #   ... other domain queries
-│   ├── preprocessing/
-│   │   ├── percentiles.py           #   Percentile computation
-│   │   └── anomaly_flags.py         #   Flag outliers + trends
-│   ├── mappings/
-│   │   ├── domain_resolver.py       #   function → domain (Production→M&S, Sales→GTM)
-│   │   ├── mns_mapping.py           #   BU + cluster resolution
-│   │   └── .../                     #   ... other domain mappings
-│   ├── connections/
-│   │   ├── correlations.py          #   Statistical correlation engine
-│   │   └── .../                     #   ... root causes, causal impact (future)
-│   └── configs/
-│       ├── sanofi.yaml              #   Tenant config
-│       ├── domains/
-│       │   ├── ppl.yaml             #   People KPI definitions
-│       │   ├── mns.yaml             #   M&S KPI definitions
-│       │   └── .../                 #   ... other domain configs
-│       └── mappings/
-│           └── function_to_domain.yaml
-
-packages/internal/skills/.../ppl_productivity/
-└── SKILL.md                         # Single source of truth for the agent brain
+```bash
+uv run python main.py
 ```
 
-### `aily-agent-lab` — Agent class + templates
+### Workflow
 
 ```
-packages/aily-agent-team-productivity/
-├── aily_agent_team_productivity/
-│   ├── cli.py                       # Click CLI (exists)
-│   ├── runners.py                   # deploy_agent() wrapper (exists)
-│   ├── agent/
-│   │   ├── team_productivity_agent.py   # BaseAgent subclass
-│   │   ├── schemas.py                   # PrioritiesOutput
-│   │   ├── templates/
-│   │   │   ├── billboard_leaderboard.py
-│   │   │   └── billboard_detail.py
-│   │   └── config/
-│   │       └── config.yaml              # servers, LLM, parallel settings
-├── tests/
-│   └── test_imports.py
+find → select N → profile → (clusters) → kpis
+```
+
+### Commands
+
+**1. Find a manager**
+
+```
+> find --geo Germany --level "Exec Level 2" --location Frankfurt
+```
+
+Filters: `--geo`, `--level`, `--location`, `--gbu`, `--level-02`, `--function`, `--include-non-managers`
+
+**2. Select a candidate** (auto-loads profile)
+
+```
+> 0
+```
+
+Or go direct with a known hash:
+
+```
+> profile ed19990d01ae19bbb49fe33d6ffd199dfa8f697b0762dda99782bdb1ba2b5cb4
+```
+
+**3. View profile** (shows active teams, detected domain, geo_codes)
+
+```
+> profile
+```
+
+**4. Override domain if auto-detection is wrong**
+
+```
+> set-kpi MSLT_VACCINES
+```
+
+**5. List available MNS clusters** for the detected BU
+
+```
+> clusters
+```
+
+**6. Generate dashboards** (opens Plotly in browser)
+
+```
+> kpis                  # All BU clusters, active teams only
+> kpis 0 3 5            # Only clusters at indices 0, 3, 5
+> kpis --all            # Include historical/inactive teams
+> kpis --all 0 3 5      # Both flags combined
+```
+
+This generates two Plotly dashboards:
+- **PPL Team KPIs**: 18 panels (headcount, attrition, health, diversity, risk, etc.) with one line per team
+- **Domain KPIs**: BU-specific + Country Organisation KPIs with one line per cluster and dashed targets
+
+### How domain KPIs work
+
+Two sources are combined automatically:
+
+| Source | What it fetches | Filter |
+|---|---|---|
+| **BU KPIs** | All KPIs for the detected Business Unit (e.g. General Medicine) | By default all clusters. Use `clusters` + `kpis <indices>` to narrow down |
+| **Country Org KPIs** | Country-level MNS KPIs | Auto-matched to manager's `geo_codes` from PPL profile |
+
+---
+
+## Direct commands (non-interactive)
+
+```bash
+# Search for managers
+uv run python main.py --find --geo Germany --level "Exec Level 2"
+
+# Generate dashboards for a known manager
+uv run python main.py --manager <hash>
+
+# With domain KPIs
+uv run python main.py --manager <hash> --kpi-mapping MSLT_GENERAL_MEDICINE
+```
+
+---
+
+## Project structure
+
+```
+ppl/
+├── main.py                     # Entry point (interactive CLI + direct commands)
+├── src/
+│   ├── __init__.py             # Public API
+│   ├── data.py                 # Data loading functions (tool-ready)
+│   ├── plots.py                # Plotly dashboards
+│   ├── config.py               # KPI definitions, mapping rules, palettes
+│   └── paths.py                # Path constants
+├── sql/
+│   ├── find_manager.sql        # Manager lookup by descriptive filters
+│   ├── manager_profile.sql     # Manager self-info + reports context
+│   ├── manager_active_teams.sql# Active teams at a snapshot
+│   ├── manager_team_kpis.sql   # 21 monthly PPL KPIs per team
+│   └── manager_domain_kpis.sql # MNS domain KPIs (BU + Country Org)
+├── .env                        # Environment config (not committed)
 └── pyproject.toml
 ```
 
-### How they connect
+## KPIs tracked
 
-```python
-# Inside TeamProductivityAgent.run():
+### PPL Team KPIs (18 panels)
 
-config = MCPConfig(
-    servers={
-        "aily-mcp-ppl": "==1.0.0",        # data + analysis tools
-        "aily-mcp-skills": "==1.4.5",      # skill loader → no duplication
-    },
-    system_prompt="Load ppl_productivity skill. Analyze manager {id}. Return PrioritiesOutput.",
-    llm=BedrockModelID.LatestSonnet,
-)
-priorities = asyncio.run(run_question(config, question, output_type=PrioritiesOutput))
-# → wrap in BillboardTemplates → return (templates, structure, metadata)
-```
+| Category | Metrics |
+|---|---|
+| Size & Capacity | Headcount, Attrition Rate 12m |
+| Demographics | Average Age, Near Retirement % |
+| Tenure & Stability | Avg Tenure, Avg Time in Position |
+| Compensation & Diversity | Median Salary, % Female |
+| Team Health | Health Score, Development Score, Mobility Score, Succession Score |
+| Talent Pipeline | Ready for Promotion %, Succession Candidates % |
+| Risk | High Retention Risk %, Critical Flight Risk % |
+| Management Structure | Managers in Team %, Avg Span of Control |
 
----
+### Domain KPIs (MNS)
 
-## Tools — what the LLM sees vs what runs inside
-
-The LLM calls tools by name + params. Everything else (SQL, mappings, preprocessing)
-is **internal to the tool** — the LLM never sees it. Same pattern as `aily-mcp-fin`.
-
-| Tool | LLM calls | What runs inside the tool (hidden from LLM) |
-|------|-----------|----------------------------------------------|
-| `get_manager_kpis` | `(manager_code, snapshot_date)` | domain_resolver → sql/{domain}/ → Dal → percentiles → anomaly_flags → JSON |
-| `get_kpi_drivers` | `(manager_code, kpi_name, snapshot_date)` | sql/ppl/driver_detail.sql → Dal → anonymized drill-down → JSON |
-| `detect_cross_domain_correlations` | `(manager_code, snapshot_date)` | connections/correlations.py → statistical engine → JSON |
-
-### Inside `get_manager_kpis` (example flow)
-
-```
-LLM calls:  get_manager_kpis(manager_code="abc123", snapshot_date="2024-12-01")
-                │
-                │   ┌─── INTERNAL (tool code, invisible to LLM) ──────┐
-                │   │                                                  │
-                ▼   │  1. configs/domains/*.yaml → load KPI defs       │
-                    │  2. mappings/domain_resolver.py                   │
-                    │     manager.function (Production) → domain (M&S)  │
-                    │  3. mappings/mns_mapping.py                       │
-                    │     BU + cluster resolution                       │
-                    │  4. sql/ppl/manager_kpis.sql → Dal.fetch_data()  │
-                    │  5. sql/mns/site_kpis.sql   → Dal.fetch_data()  │
-                    │  6. preprocessing/percentiles.py → peer ranking   │
-                    │  7. preprocessing/anomaly_flags.py → flag outliers│
-                    │                                                  │
-                    └──────────────────────────────────────────────────┘
-                │
-                ▼
-LLM receives: { profile: {...}, people_kpis: [...flagged...], business_kpis: [...flagged...] }
-```
-
-This follows the same pattern as `fin_cross_sell_category` (builds SQL internally via `Dal`,
-applies fuzzy matching, returns clean JSON) and `mns_pulse` (calls Data API internally,
-returns aggregated data).
-
----
-
-## Schemas — where they live
-
-| Schema | Lives in | Purpose |
-|--------|----------|---------|
-| `BillboardTemplate`, `DeepDive`, `TextSentiment`, etc. | **`aily-agent`** (`aily_agent/schemas/output_templates/`) | Frontend template types — imported by agent-lab |
-| `PrioritiesOutput` (Pydantic) | **`aily-agent-lab`** (`aily_agent_team_productivity/agent/schemas.py`) | Structured LLM output — what `run_question()` returns |
-
-```python
-# In team_productivity_agent.py:
-from aily_agent.schemas.output_templates.templates.community.billboard import (
-    BillboardTemplate, BillboardDetail, DeepDive    # from aily-agent repo
-)
-from .schemas import PrioritiesOutput                # local to this agent
-```
-
-The agent gets `PrioritiesOutput` from the LLM, then maps it to `BillboardTemplate` for the frontend.
-
----
-
-## Adding a new domain
-
-Adding GTM, Finance, R&D... = SQL + config + mapping. **Tool signatures don't change.**
-
-```
-1. Add sql/gtm/pipeline_kpis.sql
-2. Add configs/domains/gtm.yaml          (metrics, table, relevant_functions)
-3. Add mappings/gtm_mapping.py           (how managers map to GTM KPIs)
-4. Update function_to_domain.yaml        (Sales → GTM, Commercial → GTM)
-5. Done. get_manager_kpis auto-detects the new domain.
-```
-
-```
-configs/domains/mns.yaml       configs/domains/gtm.yaml       configs/domains/...
-         │                              │                              │
-         └──────────────┬───────────────┘──────────────────────────────┘
-                        ▼
-              domain_resolver.py              ← INSIDE the tool
-              manager.function → relevant domains
-                        │
-                        ▼
-              sql/{domain}/ → Dal → preprocessing → flags
-                        │
-                        ▼
-              get_manager_kpis returns: people_kpis[] + business_kpis[]
-                        │
-                        ▼
-              connections/correlations.py → cross-domain analysis   ← INSIDE detect_cross_domain_correlations
-                        │
-                        ▼
-              LLM loop (skill) → priorities   ← HERE is where the LLM reasons
-```
-
----
-
-## vs Performance Agent (`aily-agent-ppl`)
-
-| | Performance Agent | Productivity Agent (this) |
-|---|---|---|
-| Focus | People KPIs + surveys | People × Business KPIs |
-| Intelligence | SHAP/DiCE + LLM refinement | LLM agent loop with MCP tools |
-| Extensibility | Self-contained | New domains plug in |
-| Superagent | Not accessible | Same skill + tools |
-| Replaces? | — | No, complementary |
+Dynamically loaded from `mns_kpi_facts` based on detected `kpi_mapping`. Includes all available KPI codes for the Business Unit + Country Organisation KPIs matching the manager's countries.
