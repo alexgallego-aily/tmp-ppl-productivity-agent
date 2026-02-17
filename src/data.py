@@ -13,10 +13,93 @@ import pandas as pd
 from aily_data_access_layer.dal import Dal
 from aily_py_commons.io.read import read_text
 
-from .config import KPI_MAPPING_LABELS, PPL_CORRELATABLE_KPIS, suggest_kpi_mapping
+from .config import (
+    KPI_MAPPING_LABELS,
+    MANAGEMENT_LEVEL_COLUMNS,
+    PPL_CORRELATABLE_KPIS,
+    suggest_kpi_mapping,
+)
 from .paths import SQL_DIR
 
 _logger = logging.getLogger(__name__)
+
+# ── Hierarchical diversity index ─────────────────────────────────
+# Numeric values for hierarchical levels (lowest to highest)
+HIERARCHICAL_LEVEL_VALUES = {
+    "Local": 1,
+    "Level 1": 2,
+    "Level 2": 3,
+    "Level 3": 4,
+    "Level 4": 5,
+    "Level 5": 6,
+    "Exec Level 1": 7,
+    "Exec Level 2": 8,
+    "Exec Comm": 9,
+}
+
+# Mapping pct_* column → level name
+_COLUMN_TO_LEVEL = {col: label for col, label in MANAGEMENT_LEVEL_COLUMNS}
+
+
+def hierarchical_diversity_index(proportions_dict: dict[str, float]) -> float:
+    """Compute weighted average distance between all pairs of levels.
+
+    Formula: Σ(prop_i * prop_j * |level_i - level_j|) for all pairs i,j.
+    Higher = more hierarchically diverse.
+
+    Args:
+        proportions_dict: dict with {level: proportion} (0-1)
+
+    Returns:
+        float: diversity index
+    """
+    total_distance = 0.0
+    levels = list(proportions_dict.keys())
+
+    for i, level_i in enumerate(levels):
+        for level_j in levels[i + 1 :]:
+            prop_i = proportions_dict.get(level_i, 0.0) or 0.0
+            prop_j = proportions_dict.get(level_j, 0.0) or 0.0
+            distance = abs(
+                HIERARCHICAL_LEVEL_VALUES.get(level_i, 0)
+                - HIERARCHICAL_LEVEL_VALUES.get(level_j, 0)
+            )
+            total_distance += prop_i * prop_j * distance
+
+    return total_distance
+
+
+def compute_hierarchical_diversity_column(data: pd.DataFrame) -> pd.DataFrame:
+    """Add hierarchical_diversity_idx column to the DataFrame.
+
+    Computes the hierarchical diversity index for each row from
+    pct_exec_comm, pct_level_1, etc. columns (values 0-100).
+
+    Args:
+        data: DataFrame with proportion columns per level
+
+    Returns:
+        DataFrame with additional hierarchical_diversity_idx column
+    """
+    df = data.copy()
+    prop_cols = [c for c, _ in MANAGEMENT_LEVEL_COLUMNS if c in df.columns]
+    if not prop_cols:
+        df["hierarchical_diversity_idx"] = None
+        return df
+
+    def _row_diversity(row: pd.Series) -> float:
+        proportions = {}
+        for col in prop_cols:
+            level = _COLUMN_TO_LEVEL.get(col)
+            if level and pd.notna(row.get(col)):
+                # Convert 0-100 to 0-1
+                proportions[level] = float(row[col]) / 100.0
+        if not proportions:
+            return None
+        return hierarchical_diversity_index(proportions)
+
+    df["hierarchical_diversity_idx"] = df.apply(_row_diversity, axis=1)
+    return df
 
 
 def _load_sql(filename: str) -> str:
