@@ -10,7 +10,12 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from .config import TEAM_KPI_PANELS, TEAM_PALETTE
+from .config import (
+    MANAGEMENT_LEVEL_COLUMNS,
+    MANAGEMENT_LEVEL_PALETTE,
+    TEAM_KPI_PANELS,
+    TEAM_PALETTE,
+)
 
 
 # ===================================================================
@@ -78,12 +83,15 @@ def plot_manager_team_dashboard(
             team_labels[key] = f"{row['organization_level_code'][:25]} · {row['geo_code']}"
         team_colors[key] = TEAM_PALETTE[i % len(TEAM_PALETTE)]
 
-    # ── subplots ──────────────────────────────────────────────────
+    # ── subplots: standard KPIs + one composition panel per team ───
     panels = TEAM_KPI_PANELS
-    n_panels = len(panels)
-    n_rows = (n_panels + 1) // 2
+    n_standard = len(panels)
+    composition_titles = [f"Mgmt Levels: {team_labels[k]}" for k in team_keys]
+    n_composition = len(team_keys)
+    n_total = n_standard + n_composition
+    n_rows = (n_total + 1) // 2
 
-    titles = [p[1] for p in panels]
+    titles = [p[1] for p in panels] + composition_titles
 
     fig = make_subplots(
         rows=n_rows,
@@ -127,6 +135,37 @@ def plot_manager_team_dashboard(
 
         if y_range:
             fig.update_yaxes(range=y_range, row=row, col=col)
+
+    # ── composition panels (one per team: proportion per management level) ─
+    for team_idx, key in enumerate(team_keys):
+        org, geo = key
+        panel_idx = n_standard + team_idx
+        row = panel_idx // 2 + 1
+        col = panel_idx % 2 + 1
+
+        team_data = data[
+            (data["organization_level_code"] == org)
+            & (data["geo_code"] == geo)
+        ].sort_values("month")
+
+        shown_in_legend = team_idx == 0
+        for col_name, label in MANAGEMENT_LEVEL_COLUMNS:
+            if col_name not in team_data.columns or team_data[col_name].isna().all():
+                continue
+            color = MANAGEMENT_LEVEL_PALETTE.get(col_name, "#999999")
+            fig.add_trace(
+                go.Scatter(
+                    x=team_data["month"],
+                    y=team_data[col_name],
+                    name=label,
+                    line=dict(color=color, width=2),
+                    mode="lines+markers",
+                    legendgroup=col_name,
+                    showlegend=shown_in_legend,
+                ),
+                row=row, col=col,
+            )
+        fig.update_yaxes(range=[0, 100], row=row, col=col)
 
     # ── reference lines ───────────────────────────────────────────
     _ref_lines = {
@@ -376,7 +415,8 @@ def plot_domain_kpi_dashboard(
 
 # Human-readable labels for PPL KPI column names
 _PPL_KPI_LABELS: dict[str, str] = {
-    p[0]: p[1] for p in TEAM_KPI_PANELS
+    **{p[0]: p[1] for p in TEAM_KPI_PANELS},
+    **{col: f"{label} (%)" for col, label in MANAGEMENT_LEVEL_COLUMNS},
 }
 
 

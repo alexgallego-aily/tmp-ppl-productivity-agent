@@ -61,6 +61,10 @@ def aggregate_team_kpis(data: pd.DataFrame) -> pd.DataFrame:
         "pct_succession_candidates", "pct_high_retention_risk",
         "pct_critical_flight_risk", "pct_managers", "avg_span_of_control",
         "pct_long_in_position",
+        # Management level composition
+        "pct_exec_comm", "pct_exec_level_1", "pct_exec_level_2",
+        "pct_level_1", "pct_level_2", "pct_level_3",
+        "pct_level_4", "pct_level_5", "pct_local",
     ]
     sum_cols = [c for c in sum_cols if c in data.columns]
     kpi_cols = [c for c in kpi_cols if c in data.columns]
