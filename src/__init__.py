@@ -28,6 +28,7 @@ from .data import (
 from .plots import (
     plot_manager_team_dashboard,
     plot_domain_kpi_dashboard,
+    plot_correlation_pair,
 )
 
 # ── Config & mapping rules ───────────────────────────────────────

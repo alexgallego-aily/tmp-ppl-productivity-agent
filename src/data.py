@@ -625,13 +625,13 @@ def load_manager_domain_kpis(
     # Cluster filter: empty string = all clusters, otherwise AND IN (...)
     if bu_clusters:
         escaped = [c.replace("'", "''") for c in bu_clusters]
-        bu_cluster_filter = "AND cluster_label IN (" + ", ".join(f"'{c}'" for c in escaped) + ")"
+        bu_cluster_filter = "AND c.cluster_label IN (" + ", ".join(f"'{c}'" for c in escaped) + ")"
     else:
         bu_cluster_filter = ""
 
     # Date filter: drastically reduces scan on large fact tables
     if lookback_years:
-        date_filter = f"AND k.kpi_facts_date >= DATEADD(year, -{lookback_years}, CURRENT_DATE)"
+        date_filter = f"AND k.kpi_facts_date >= CURRENT_DATE - INTERVAL '{lookback_years} years'"
     else:
         date_filter = ""
 

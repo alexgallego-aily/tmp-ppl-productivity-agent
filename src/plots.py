@@ -3,6 +3,7 @@ plots — Visualizations.
 
 1. plot_manager_team_dashboard  — Per-team PPL KPI dashboard for a single manager
 2. plot_domain_kpi_dashboard    — MNS domain KPI dashboard (BU + Country Org)
+3. plot_correlation_pair        — Dual-axis overlay of an MNS KPI vs a PPL KPI
 """
 
 import pandas as pd
@@ -364,6 +365,160 @@ def plot_domain_kpi_dashboard(
         ),
         hovermode="x unified",
         margin=dict(r=260, t=110, b=60, l=60),
+    )
+
+    return fig
+
+
+# ===================================================================
+# 3. CORRELATION PAIR EXPLORER
+# ===================================================================
+
+# Human-readable labels for PPL KPI column names
+_PPL_KPI_LABELS: dict[str, str] = {
+    p[0]: p[1] for p in TEAM_KPI_PANELS
+}
+
+
+def plot_correlation_pair(
+    ppl_data: pd.DataFrame,
+    domain_df: pd.DataFrame,
+    mns_kpi: str,
+    ppl_kpi: str,
+    lag: int = 0,
+    p_value: float | None = None,
+    transfer_entropy: float | None = None,
+    explained_entropy: float | None = None,
+) -> go.Figure:
+    """Plot two time series (MNS effect + PPL cause) on a dual-axis chart.
+
+    Optionally shifts the PPL series forward by ``lag`` months to visually
+    align the cause with the effect.
+
+    Args:
+        ppl_data: Raw DataFrame from ``load_manager_team_kpis()``.
+        domain_df: DataFrame from ``load_manager_domain_kpis()``.
+        mns_kpi: The MNS KPI code (e.g. ``'OTIF_RATE'``).
+        ppl_kpi: The PPL KPI column name (e.g. ``'attrition_rate_pct'``).
+        lag: Lag in months (PPL leads MNS by this many months).
+        p_value: Granger p-value for the annotation.
+        transfer_entropy: TE value for the annotation.
+        explained_entropy: EE value for the annotation.
+
+    Returns:
+        Plotly Figure with dual y-axes.
+    """
+    from .data import aggregate_team_kpis
+
+    # --- Extract MNS series (bu_aggregate preferred) ---
+    bu_agg = domain_df[domain_df["source"] == "bu_aggregate"].copy()
+    if len(bu_agg) == 0:
+        bu_agg = domain_df[domain_df["source"] == "domain"].copy()
+
+    mns_series = bu_agg[bu_agg["kpi_code"] == mns_kpi].copy()
+    mns_series["date"] = pd.to_datetime(mns_series["kpi_facts_date"]).dt.to_period("M").dt.to_timestamp()
+    mns_series = (
+        mns_series.groupby("date")["kpi_value"]
+        .mean()
+        .sort_index()
+        .reset_index()
+    )
+
+    # --- Extract PPL series (aggregated across all teams) ---
+    agg = aggregate_team_kpis(ppl_data)
+    if ppl_kpi not in agg.columns:
+        raise ValueError(f"PPL KPI '{ppl_kpi}' not found in aggregated data")
+
+    ppl_series = agg[["month", ppl_kpi]].dropna(subset=[ppl_kpi]).copy()
+    ppl_series["date"] = pd.to_datetime(ppl_series["month"]).dt.to_period("M").dt.to_timestamp()
+    ppl_series = ppl_series.sort_values("date").reset_index(drop=True)
+
+    # --- Shift PPL series forward by lag to align visually ---
+    if lag > 0:
+        ppl_shifted = ppl_series.copy()
+        ppl_shifted["date"] = ppl_shifted["date"] + pd.DateOffset(months=lag)
+    else:
+        ppl_shifted = ppl_series
+
+    # --- Build figure ---
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    ppl_label = _PPL_KPI_LABELS.get(ppl_kpi, ppl_kpi)
+
+    # MNS series on primary y-axis (blue)
+    fig.add_trace(
+        go.Scatter(
+            x=mns_series["date"],
+            y=mns_series["kpi_value"],
+            name=f"MNS: {mns_kpi}",
+            line=dict(color="#1f77b4", width=2.5),
+            mode="lines+markers",
+            marker=dict(size=4),
+        ),
+        secondary_y=False,
+    )
+
+    # PPL series (original position) on secondary y-axis — faded
+    fig.add_trace(
+        go.Scatter(
+            x=ppl_series["date"],
+            y=ppl_series[ppl_kpi],
+            name=f"PPL: {ppl_label}",
+            line=dict(color="#ff7f0e", width=2, dash="dot"),
+            mode="lines",
+            opacity=0.35,
+        ),
+        secondary_y=True,
+    )
+
+    # PPL series (shifted by lag) on secondary y-axis — solid
+    if lag > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=ppl_shifted["date"],
+                y=ppl_shifted[ppl_kpi],
+                name=f"PPL: {ppl_label} (shifted +{lag}m)",
+                line=dict(color="#ff7f0e", width=2.5),
+                mode="lines+markers",
+                marker=dict(size=4),
+            ),
+            secondary_y=True,
+        )
+
+    # --- Axis labels ---
+    fig.update_yaxes(title_text=f"MNS: {mns_kpi}", secondary_y=False, color="#1f77b4")
+    fig.update_yaxes(title_text=f"PPL: {ppl_label}", secondary_y=True, color="#ff7f0e")
+    fig.update_xaxes(title_text="Date")
+
+    # --- Title with metrics ---
+    title = f"Correlation Explorer: {mns_kpi}  \u2190  {ppl_label}"
+    metrics_parts = []
+    if p_value is not None:
+        metrics_parts.append(f"p={p_value:.4f}")
+    if transfer_entropy is not None:
+        metrics_parts.append(f"TE={transfer_entropy:.3f}")
+    if explained_entropy is not None:
+        metrics_parts.append(f"EE={explained_entropy:.3f}")
+    if lag > 0:
+        metrics_parts.append(f"lag={lag}m")
+
+    subtitle = "  |  ".join(metrics_parts) if metrics_parts else ""
+
+    fig.update_layout(
+        title=dict(
+            text=f"{title}<br><sup>{subtitle}</sup>",
+            x=0.5,
+            font=dict(size=16),
+        ),
+        template="plotly_white",
+        showlegend=True,
+        legend=dict(
+            x=0.01, y=0.99, xanchor="left", yanchor="top",
+            bgcolor="rgba(255,255,255,0.9)", font=dict(size=10),
+        ),
+        hovermode="x unified",
+        height=500,
+        margin=dict(t=100, b=60, l=60, r=60),
     )
 
     return fig

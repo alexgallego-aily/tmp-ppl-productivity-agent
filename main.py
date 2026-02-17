@@ -33,6 +33,7 @@ from src import (
     run_correlation,
     plot_manager_team_dashboard,
     plot_domain_kpi_dashboard,
+    plot_correlation_pair,
     KPI_MAPPING_LABELS,
     MIN_TEAM_HEADCOUNT,
 )
@@ -77,6 +78,7 @@ def _run_interactive():
     mns_clusters = None     # list of available clusters for the profile's BU
     last_ppl_data = None    # DataFrame from kpis (for correlate)
     last_domain_df = None   # DataFrame from kpis (for correlate)
+    last_corr_result = None # DataFrame from correlate (for explore)
 
     _print_banner()
 
@@ -182,8 +184,7 @@ def _run_interactive():
             )
 
             if last_ppl_data is not None and last_domain_df is not None and len(last_domain_df) > 0:
-                print(f"\n  {_B}Tip:{_D} Type {_B}'correlate'{_D} to run Root Cause Analysis (MNS ← PPL)."
-                      f"  Use {_B}'correlate --lag 12'{_D} to change max lag.")
+                print(f"\n  {_G}Type 'correlate' to run Root Cause Analysis (MNS ← PPL).  Use 'correlate --lag 12' to change max lag.{_D}")
 
         # ── correlate  (RCA: MNS ← PPL) ─────────────────────────
         elif cmd == "correlate":
@@ -193,7 +194,14 @@ def _run_interactive():
             if last_domain_df is None or len(last_domain_df) == 0:
                 print("  No domain KPIs available. Run 'kpis' with a valid kpi_mapping.")
                 continue
-            _interactive_correlate(last_ppl_data, last_domain_df, rest, profile)
+            last_corr_result = _interactive_correlate(last_ppl_data, last_domain_df, rest, profile)
+
+        # ── explore N  (plot a correlation pair) ──────────────────
+        elif cmd == "explore":
+            if last_corr_result is None or len(last_corr_result) == 0:
+                print("  Run 'correlate' first to get results.")
+                continue
+            _interactive_explore(rest, last_corr_result, last_ppl_data, last_domain_df)
 
         # ── help ──────────────────────────────────────────────────
         elif cmd in ("help", "h", "?"):
@@ -212,7 +220,7 @@ def _print_banner():
     print(f"""
 {_B}PPL Manager Analytics — Interactive Console{_D}
 {'─' * 50}
-Commands: find, select, profile, clusters, kpis, correlate, help, quit
+Commands: find, select, profile, clusters, kpis, correlate, explore, help, quit
 """)
 
 
@@ -255,10 +263,16 @@ def _print_help():
                           --lag N   Max lag in months (default 6)
                           Only shows pairs with significant signal.
 
+  {_B}explore{_D} N [N2 ...]    Plot a correlation pair from 'correlate' results.
+                          Opens a dual-axis Plotly chart with both time series.
+                          The PPL series is shown both at original position
+                          (faded) and shifted forward by lag (solid).
+                          Examples: explore 0     explore 0 2 5
+
   {_B}help{_D}                  Show this help
   {_B}quit{_D}                  Exit
 
-{_B}Workflow:{_D}  find → select N → profile → (set-kpi / clusters) → kpis → correlate
+{_B}Workflow:{_D}  find → select N → profile → (set-kpi / clusters) → kpis → correlate → explore N
 """)
 
 
@@ -539,7 +553,10 @@ def _interactive_kpis(
 # ── correlate ────────────────────────────────────────────────────
 
 def _interactive_correlate(ppl_data, domain_df, rest: str, profile: dict):
-    """Run Root Cause Analysis and display results in the console."""
+    """Run Root Cause Analysis and display results in the console.
+
+    Returns the result DataFrame so the caller can store it for ``explore``.
+    """
     import shlex
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -548,7 +565,7 @@ def _interactive_correlate(ppl_data, domain_df, rest: str, profile: dict):
         opts = parser.parse_args(shlex.split(rest) if rest.strip() else [])
     except SystemExit:
         print("  Usage: correlate [--lag N]")
-        return
+        return None
 
     max_lag = opts.lag
     print(f"\n  {_B}Root Cause Analysis{_D} (MNS → PPL, max_lag={max_lag})")
@@ -560,7 +577,10 @@ def _interactive_correlate(ppl_data, domain_df, rest: str, profile: dict):
         print(f"  {_G}No significant correlations found.{_D}")
         print("  This means no PPL KPI passed the Granger Causality or")
         print("  Transfer Entropy tests against the MNS domain KPIs.")
-        return
+        return None
+
+    # Number results for explore indexing
+    result = result.reset_index(drop=True)
 
     # Display results grouped by MNS KPI
     manager_label = profile.get("kpi_mapping_label", "")
@@ -568,7 +588,7 @@ def _interactive_correlate(ppl_data, domain_df, rest: str, profile: dict):
     print(f"  Found {_B}{len(result)}{_D} significant correlations:\n")
 
     prev_mns = None
-    for _, row in result.iterrows():
+    for idx, row in result.iterrows():
         mns_kpi = row.get("id_kpi_code", "?")
         ppl_kpi = row.get("kpi", "?")
         p_val = row.get("min_p_value", 0)
@@ -589,7 +609,7 @@ def _interactive_correlate(ppl_data, domain_df, rest: str, profile: dict):
             signal = "*  "
 
         print(
-            f"    {signal} {ppl_kpi:<35s}  "
+            f"    [{idx:>2d}] {signal} {ppl_kpi:<35s}  "
             f"p={p_val:.4f}  "
             f"TE={te:.3f}  "
             f"EE={ee:.3f}  "
@@ -599,6 +619,56 @@ def _interactive_correlate(ppl_data, domain_df, rest: str, profile: dict):
     print(f"\n  {_G}Signal: * Granger only, ** TE>0.1, *** TE>0.3{_D}")
     print(f"  {_G}p = Granger p-value, TE = Transfer Entropy, EE = Explained Entropy{_D}")
     print(f"  {_G}lag = months of delay from PPL cause to MNS effect{_D}")
+    print(f"\n  {_G}Type 'explore N' to plot a pair (e.g. 'explore 0').  Use 'explore 0 1 3' to plot several.{_D}")
+
+    return result
+
+
+# ── explore ──────────────────────────────────────────────────────
+
+def _interactive_explore(rest: str, corr_result, ppl_data, domain_df):
+    """Plot one or more correlation pairs selected by index."""
+    import pandas as pd
+
+    indices_str = rest.strip().split()
+    if not indices_str:
+        print("  Usage: explore N [N2 N3 ...]  (row indices from correlate)")
+        return
+
+    try:
+        indices = [int(i) for i in indices_str]
+    except ValueError:
+        print(f"  {_G}Invalid index. Use numbers from the correlate output.{_D}")
+        return
+
+    max_idx = len(corr_result) - 1
+    for idx in indices:
+        if idx < 0 or idx > max_idx:
+            print(f"  {_G}Index {idx} out of range (0–{max_idx}). Skipping.{_D}")
+            continue
+
+        row = corr_result.iloc[idx]
+        mns_kpi = row.get("id_kpi_code", "?")
+        ppl_kpi = row.get("kpi", "?")
+        p_val = row.get("min_p_value")
+        te = row.get("transfer_entropy")
+        ee = row.get("explained_entropy")
+        lag = int(row.get("lag", 0))
+
+        print(f"  Plotting [{idx}]: {mns_kpi} ← {ppl_kpi} (lag={lag}m) …")
+        try:
+            fig = plot_correlation_pair(
+                ppl_data, domain_df,
+                mns_kpi=mns_kpi,
+                ppl_kpi=ppl_kpi,
+                lag=lag,
+                p_value=float(p_val) if pd.notna(p_val) else None,
+                transfer_entropy=float(te) if pd.notna(te) else None,
+                explained_entropy=float(ee) if pd.notna(ee) else None,
+            )
+            fig.show()
+        except Exception as exc:
+            print(f"  {_G}Error plotting [{idx}]: {exc}{_D}")
 
 
 def _print_domain_kpi_sample(domain_df):

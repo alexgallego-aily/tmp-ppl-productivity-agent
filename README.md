@@ -144,6 +144,7 @@ Each CLI command maps 1:1 to a future MCP tool:
 | `clusters` | `get_available_mns_clusters(business_unit)` | `get_available_clusters` |
 | `kpis` | `load_manager_team_kpis()` + `load_manager_domain_kpis()` | `get_manager_kpis` |
 | `correlate` | `run_correlation(ppl_data, domain_df)` | `detect_cross_domain_correlations` |
+| `explore N` | `plot_correlation_pair(ppl_data, domain_df, mns_kpi, ppl_kpi)` | (visualization — LLM describes chart) |
 
 The functions in `src/data.py` return structured dicts/DataFrames — ready for MCP tool wrapping.
 
@@ -171,7 +172,7 @@ uv run python main.py
 ### Workflow
 
 ```
-find → select N → profile → (clusters) → kpis → correlate
+find → select N → profile → (clusters) → kpis → correlate → explore N
 ```
 
 ### Commands
@@ -274,6 +275,19 @@ Reading this:
 - **% female** has a **weak** (`*`) signal — likely spurious.
 
 Focus on `***` and `**` pairs. The **lag** tells you how far in advance the people signal predicts the business impact. Results with `p > 0.05` are already filtered out.
+
+**8. Explore a correlation pair** (visual deep dive)
+
+```
+> explore 0              # Plot the first correlation pair
+> explore 0 2 5          # Plot multiple pairs (opens one chart each)
+```
+
+Opens a dual-axis Plotly chart showing both time series superimposed:
+- **Left axis** (blue): MNS KPI (effect)
+- **Right axis** (orange): PPL KPI (cause)
+- The PPL series is shown twice: at its **original position** (faded dotted line) and **shifted forward by lag** (solid line). When the shifted PPL line aligns with the MNS line, the lag relationship becomes visually obvious.
+- Correlation metrics (p, TE, EE, lag) are displayed in the chart subtitle.
 
 ### How domain KPIs work
 
@@ -398,3 +412,11 @@ ppl/
 ## Domain KPIs (MNS)
 
 Dynamically loaded from `mns_kpi_facts` based on detected `kpi_mapping`. Includes all available KPI codes for the Business Unit + Country Organisation KPIs matching the manager's countries.
+
+---
+
+## Possible improvements
+
+- **Correlation sign (Pearson r)**: Currently `correlate` reports Granger p-value, Transfer Entropy, and Explained Entropy — but not whether the relationship is positive or negative. Adding the lagged Pearson correlation coefficient (`r`) would immediately tell users if a PPL KPI increase leads to an MNS KPI increase (`r > 0`) or decrease (`r < 0`), without needing to visually inspect via `explore`.
+- **Lookup table for kpi_mapping**: Replace heuristic keyword rules with a database lookup (see "Planned: lookup table integration" above).
+- **Additional domains**: Extend beyond M&S to GTM, Finance, R&D — only requires new SQL + config mappings.
