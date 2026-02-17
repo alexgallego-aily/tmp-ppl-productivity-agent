@@ -10,7 +10,14 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from .config import TEAM_KPI_PANELS, TEAM_PALETTE
+from .data import compute_hierarchical_diversity_column
+
+from .config import (
+    MANAGEMENT_LEVEL_COLUMNS,
+    MANAGEMENT_LEVEL_PALETTE,
+    TEAM_KPI_PANELS,
+    TEAM_PALETTE,
+)
 
 
 # ===================================================================
@@ -54,6 +61,9 @@ def plot_manager_team_dashboard(
         print(f"No data for manager {manager_code}")
         return None
 
+    # Compute hierarchical diversity index for each row
+    data = compute_hierarchical_diversity_column(data)
+
     # ── identify teams (ordered by avg headcount desc) ────────────
     teams = (
         data.groupby(["organization_level_code", "geo_code"])
@@ -78,12 +88,18 @@ def plot_manager_team_dashboard(
             team_labels[key] = f"{row['organization_level_code'][:25]} · {row['geo_code']}"
         team_colors[key] = TEAM_PALETTE[i % len(TEAM_PALETTE)]
 
-    # ── subplots ──────────────────────────────────────────────────
+    # ── subplots: standard KPIs + one hierarchical diversity panel per manager ─
     panels = TEAM_KPI_PANELS
-    n_panels = len(panels)
-    n_rows = (n_panels + 1) // 2
+    n_standard = len(panels)
+    # One plot per manager: hierarchical diversity index (single panel)
+    # (Commented out: per-team composition panels — recoverable)
+    # composition_titles = [f"Mgmt Levels: {team_labels[k]}" for k in team_keys]
+    # n_composition = len(team_keys)
+    n_composition = 1  # Single panel: Hierarchical Diversity Index
+    n_total = n_standard + n_composition
+    n_rows = (n_total + 1) // 2
 
-    titles = [p[1] for p in panels]
+    titles = [p[1] for p in panels] + ["Hierarchical Diversity Index"]
 
     fig = make_subplots(
         rows=n_rows,
@@ -127,6 +143,65 @@ def plot_manager_team_dashboard(
 
         if y_range:
             fig.update_yaxes(range=y_range, row=row, col=col)
+
+    # ── Hierarchical Diversity Index (one plot per manager) ─────────────────
+    # Single panel: one line per team, Y = hierarchical diversity index
+    panel_idx = n_standard
+    row = panel_idx // 2 + 1
+    col = panel_idx % 2 + 1
+
+    for key in team_keys:
+        org, geo = key
+        color = team_colors[key]
+        team_data = data[
+            (data["organization_level_code"] == org)
+            & (data["geo_code"] == geo)
+        ].sort_values("month")
+
+        if "hierarchical_diversity_idx" not in team_data.columns or team_data["hierarchical_diversity_idx"].isna().all():
+            continue
+
+        fig.add_trace(
+            go.Scatter(
+                x=team_data["month"],
+                y=team_data["hierarchical_diversity_idx"],
+                name=team_labels[key],
+                line=dict(color=color, width=2.5 if single_team else 2),
+                mode="lines+markers",
+                legendgroup=f"{org}_{geo}",
+                showlegend=True,
+            ),
+            row=row, col=col,
+        )
+
+    # (Commented out: per-team composition panels — proportions per management level)
+    # for team_idx, key in enumerate(team_keys):
+    #     org, geo = key
+    #     panel_idx = n_standard + team_idx
+    #     row = panel_idx // 2 + 1
+    #     col = panel_idx % 2 + 1
+    #     team_data = data[
+    #         (data["organization_level_code"] == org)
+    #         & (data["geo_code"] == geo)
+    #     ].sort_values("month")
+    #     shown_in_legend = team_idx == 0
+    #     for col_name, label in MANAGEMENT_LEVEL_COLUMNS:
+    #         if col_name not in team_data.columns or team_data[col_name].isna().all():
+    #             continue
+    #         color = MANAGEMENT_LEVEL_PALETTE.get(col_name, "#999999")
+    #         fig.add_trace(
+    #             go.Scatter(
+    #                 x=team_data["month"],
+    #                 y=team_data[col_name],
+    #                 name=label,
+    #                 line=dict(color=color, width=2),
+    #                 mode="lines+markers",
+    #                 legendgroup=col_name,
+    #                 showlegend=shown_in_legend,
+    #             ),
+    #             row=row, col=col,
+    #         )
+    #     fig.update_yaxes(range=[0, 100], row=row, col=col)
 
     # ── reference lines ───────────────────────────────────────────
     _ref_lines = {
@@ -376,7 +451,8 @@ def plot_domain_kpi_dashboard(
 
 # Human-readable labels for PPL KPI column names
 _PPL_KPI_LABELS: dict[str, str] = {
-    p[0]: p[1] for p in TEAM_KPI_PANELS
+    **{p[0]: p[1] for p in TEAM_KPI_PANELS},
+    **{col: f"{label} (%)" for col, label in MANAGEMENT_LEVEL_COLUMNS},
 }
 
 

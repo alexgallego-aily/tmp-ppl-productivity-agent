@@ -98,3 +98,29 @@ TEAM_PALETTE = [
     '#1b9e77', '#d95f02', '#7570b3', '#e7298a',
     '#66a61e', '#e6ab02', '#a6761d', '#666666',
 ]
+
+# Management level composition — column names and display order
+MANAGEMENT_LEVEL_COLUMNS: list[tuple[str, str]] = [
+    ("pct_exec_comm", "Exec Comm"),
+    ("pct_exec_level_1", "Exec Level 1"),
+    ("pct_exec_level_2", "Exec Level 2"),
+    ("pct_level_1", "Level 1"),
+    ("pct_level_2", "Level 2"),
+    ("pct_level_3", "Level 3"),
+    ("pct_level_4", "Level 4"),
+    ("pct_level_5", "Level 5"),
+    ("pct_local", "Local"),
+]
+
+# Colour per management level (for composition charts)
+MANAGEMENT_LEVEL_PALETTE: dict[str, str] = {
+    "pct_exec_comm":    "#1f77b4",
+    "pct_exec_level_1": "#ff7f0e",
+    "pct_exec_level_2": "#2ca02c",
+    "pct_level_1":      "#d62728",
+    "pct_level_2":      "#9467bd",
+    "pct_level_3":      "#8c564b",
+    "pct_level_4":      "#e377c2",
+    "pct_level_5":      "#7f7f7f",
+    "pct_local":        "#bcbd22",
+}

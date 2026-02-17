@@ -20,6 +20,9 @@ from .data import (
     apply_team_size_filter,
     prepare_rca_data,
     run_correlation,
+    compute_hierarchical_diversity_column,
+    hierarchical_diversity_index,
+    HIERARCHICAL_LEVEL_VALUES,
     MIN_TEAM_HEADCOUNT,
     DEFAULT_DOMAIN_LOOKBACK_YEARS,
 )
