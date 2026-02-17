@@ -13,7 +13,7 @@ import pandas as pd
 from aily_data_access_layer.dal import Dal
 from aily_py_commons.io.read import read_text
 
-from .config import KPI_MAPPING_LABELS, suggest_kpi_mapping
+from .config import KPI_MAPPING_LABELS, PPL_CORRELATABLE_KPIS, suggest_kpi_mapping
 from .paths import SQL_DIR
 
 _logger = logging.getLogger(__name__)
@@ -29,6 +29,133 @@ def _load_sql(filename: str) -> str:
         The SQL query as a string.
     """
     return read_text(SQL_DIR / filename)
+
+
+MIN_TEAM_HEADCOUNT = 5
+"""Minimum headcount for a team to be shown individually.
+
+Teams with fewer than this many people (in the latest month) are hidden
+from the per-team dashboard but still count in the aggregate view.
+"""
+
+
+def aggregate_team_kpis(data: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate per-team KPIs into a single all-teams row per month.
+
+    Metrics are weighted by headcount.  Absolute metrics (headcount,
+    total_fte, exits_rolling_12m) are summed.
+
+    Returns a DataFrame with ``organization_level_code='ALL'`` and
+    ``geo_code='ALL'``.
+    """
+    if len(data) == 0:
+        return data
+
+    # Cast all numeric columns to float to avoid Decimal issues from the DB
+    sum_cols = ["headcount", "total_fte", "exits_rolling_12m"]
+    kpi_cols = [
+        "attrition_rate_pct", "avg_age", "pct_near_retirement",
+        "avg_tenure_years", "avg_time_in_position_years", "median_salary",
+        "pct_female", "team_health_score", "development_score",
+        "mobility_score", "succession_score", "pct_ready_for_promotion",
+        "pct_succession_candidates", "pct_high_retention_risk",
+        "pct_critical_flight_risk", "pct_managers", "avg_span_of_control",
+        "pct_long_in_position",
+    ]
+    sum_cols = [c for c in sum_cols if c in data.columns]
+    kpi_cols = [c for c in kpi_cols if c in data.columns]
+
+    data = data.copy()
+    for c in sum_cols + kpi_cols:
+        data[c] = pd.to_numeric(data[c], errors="coerce")
+
+    rows = []
+    for month, grp in data.groupby("month"):
+        total_hc = float(grp["headcount"].sum())
+        row: dict = {"month": month, "organization_level_code": "ALL", "geo_code": "ALL"}
+
+        # Sum columns
+        for c in sum_cols:
+            row[c] = float(grp[c].sum())
+
+        # Headcount-weighted average for KPI columns
+        for c in kpi_cols:
+            valid = grp[[c, "headcount"]].dropna(subset=[c])
+            if len(valid) == 0 or total_hc == 0:
+                row[c] = None
+            else:
+                row[c] = round(float((valid[c] * valid["headcount"]).sum()) / total_hc, 2)
+
+        # Recompute attrition from aggregated values
+        if "exits_rolling_12m" in row and total_hc > 0:
+            row["attrition_rate_pct"] = round(row["exits_rolling_12m"] * 100.0 / total_hc, 1)
+
+        # Text columns: take mode
+        for tc in ["primary_function", "primary_mgmt_level", "currency"]:
+            if tc in grp.columns:
+                mode = grp[tc].mode()
+                row[tc] = mode.iloc[0] if len(mode) > 0 else None
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    result["month"] = pd.to_datetime(result["month"])
+    return result.sort_values("month").reset_index(drop=True)
+
+
+def apply_team_size_filter(
+    data: pd.DataFrame,
+    min_headcount: int = MIN_TEAM_HEADCOUNT,
+) -> pd.DataFrame:
+    """Filter teams by size and prepend an aggregate row.
+
+    Logic:
+      1. Always include an aggregate row (``ALL / ALL``) that sums all
+         teams weighted by headcount.
+      2. Additionally include individual teams whose headcount in the
+         **latest month** is >= ``min_headcount``.
+      3. Teams below the threshold only contribute to the aggregate.
+
+    Args:
+        data: Per-team DataFrame from ``load_manager_team_kpis()``.
+        min_headcount: Minimum headcount to show a team individually.
+
+    Returns:
+        Combined DataFrame: aggregate rows first, then qualifying teams.
+        Includes a ``'team_label'`` column for display (``'ALL'`` or
+        ``'<org_level> · <geo>'``).
+    """
+    if len(data) == 0:
+        return data
+
+    # 1. Aggregate all teams
+    agg = aggregate_team_kpis(data)
+    agg["team_label"] = "ALL"
+
+    # 2. Find teams with enough headcount in the latest month
+    latest_month = data["month"].max()
+    latest = data[data["month"] == latest_month]
+    qualifying = latest[latest["headcount"] >= min_headcount][
+        ["organization_level_code", "geo_code"]
+    ].drop_duplicates()
+
+    if len(qualifying) == 0:
+        return agg
+
+    # 3. Keep full history for qualifying teams
+    team_data = data.merge(
+        qualifying, on=["organization_level_code", "geo_code"], how="inner",
+    ).copy()
+    team_data["team_label"] = (
+        team_data["organization_level_code"] + " · " + team_data["geo_code"]
+    )
+
+    # 4. Combine: aggregate first, then individual teams
+    combined = pd.concat([agg, team_data], ignore_index=True)
+    combined["month"] = pd.to_datetime(combined["month"])
+    return combined.sort_values(
+        ["team_label", "organization_level_code", "geo_code", "month"]
+    ).reset_index(drop=True)
 
 
 # =====================================================================
@@ -153,9 +280,26 @@ def find_manager(
 
     query = _load_sql("find_manager.sql").format(where_clause=where_clause)
     _logger.info("Searching for manager candidates …")
+    _logger.debug("WHERE clause: %s", where_clause)
     df = dal.db.fetch_data_as_df(query=query)
 
-    _logger.info("Found %d candidate(s)", len(df))
+    _logger.info("Found %d candidate(s)%s",
+                 len(df),
+                 " (is_manager=TRUE filter active)" if is_manager_only else "")
+
+    # Hint: if few results with is_manager filter, count how many without
+    if is_manager_only and len(df) <= 3:
+        without_mgr = [c for c in clauses if "is_manager" not in c]
+        where_no_mgr = "\n  ".join(without_mgr) if without_mgr else ""
+        q2 = _load_sql("find_manager.sql").format(where_clause=where_no_mgr)
+        df2 = dal.db.fetch_data_as_df(query=q2)
+        extra = len(df2) - len(df)
+        if extra > 0:
+            _logger.info(
+                "Hint: %d more candidate(s) if you use --include-non-managers",
+                extra,
+            )
+
     return df
 
 
@@ -381,19 +525,26 @@ def get_available_mns_clusters(
     if dal is None:
         dal = Dal()
 
+    # EXISTS semi-join: iterates the small clusters table and short-circuits
+    # as soon as one matching fact row is found per cluster.
     query = f"""
-    SELECT DISTINCT c.cluster_label
-    FROM data_normalized.mns_kpi_facts k
-    LEFT JOIN data_normalized.mns_business_units b
-        ON k.business_unit_code = b.business_unit_code
-    LEFT JOIN data_normalized.mns_clusters c
-        ON k.cluster_code = c.cluster_code
-    WHERE (CASE
-        WHEN b.business_unit_label IN ('GENMED', 'General Medicine')
-            THEN 'General Medicine'
-        ELSE b.business_unit_label
-    END) = '{business_unit}'
-      AND c.cluster_label IS NOT NULL
+    SELECT c.cluster_label
+    FROM data_normalized.mns_clusters c
+    WHERE c.cluster_label IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM data_normalized.mns_kpi_facts k
+        WHERE k.cluster_code = c.cluster_code
+          AND k.business_unit_code IN (
+            SELECT business_unit_code
+            FROM data_normalized.mns_business_units
+            WHERE (CASE
+                WHEN business_unit_label IN ('GENMED', 'General Medicine')
+                    THEN 'General Medicine'
+                ELSE business_unit_label
+            END) = '{business_unit}'
+          )
+      )
     ORDER BY c.cluster_label
     """
     df = dal.db.fetch_data_as_df(query=query)
@@ -429,19 +580,25 @@ def resolve_business_unit(kpi_mapping: str) -> str:
     return stripped
 
 
+DEFAULT_DOMAIN_LOOKBACK_YEARS = 3
+"""How many years of MNS KPI history to fetch by default."""
+
+
 def load_manager_domain_kpis(
     kpi_mapping: str,
     geo_codes: list[str],
     bu_clusters: list[str] | None = None,
+    lookback_years: int | None = DEFAULT_DOMAIN_LOOKBACK_YEARS,
     dal: Dal | None = None,
 ) -> pd.DataFrame:
     """Load MNS domain KPIs relevant to a manager.
 
-    Returns two categories of KPIs in a single DataFrame:
+    Returns three categories of KPIs in a single DataFrame:
       1. **Business-unit KPIs** — filtered to ``bu_clusters`` if
          provided, otherwise all clusters for the BU.
       2. **Country Organisation KPIs** — filtered to only the clusters
          that match the manager's ``geo_codes``.
+      3. **BU aggregate KPIs** — all clusters summed per date.
 
     Args:
         kpi_mapping: Domain code (e.g. ``'MSLT_GENERAL_MEDICINE'``).
@@ -449,6 +606,8 @@ def load_manager_domain_kpis(
                    (e.g. ``['France', 'Germany', 'Italy']``).
         bu_clusters: Optional list of BU cluster_labels to fetch
                      (e.g. ``['Dupixent', 'China']``).  ``None`` = all.
+        lookback_years: How many years of history to fetch.
+                        ``None`` = no limit (all history).  Default 3.
         dal: Optional Dal instance.
 
     Returns:
@@ -466,20 +625,28 @@ def load_manager_domain_kpis(
     # Cluster filter: empty string = all clusters, otherwise AND IN (...)
     if bu_clusters:
         escaped = [c.replace("'", "''") for c in bu_clusters]
-        bu_cluster_filter = "AND c.cluster_label IN (" + ", ".join(f"'{c}'" for c in escaped) + ")"
+        bu_cluster_filter = "AND cluster_label IN (" + ", ".join(f"'{c}'" for c in escaped) + ")"
     else:
         bu_cluster_filter = ""
+
+    # Date filter: drastically reduces scan on large fact tables
+    if lookback_years:
+        date_filter = f"AND k.kpi_facts_date >= DATEADD(year, -{lookback_years}, CURRENT_DATE)"
+    else:
+        date_filter = ""
 
     query = _load_sql("manager_domain_kpis.sql").format(
         business_unit=business_unit,
         bu_cluster_filter=bu_cluster_filter,
         geo_list=geo_list,
+        date_filter=date_filter,
     )
     _logger.info(
-        "Loading domain KPIs: BU=%s, clusters=%s, geos=%s …",
+        "Loading domain KPIs: BU=%s, clusters=%s, geos=%s, lookback=%s …",
         business_unit,
         f"{len(bu_clusters)} selected" if bu_clusters else "all",
         geo_codes,
+        f"{lookback_years}y" if lookback_years else "all",
     )
     df = dal.db.fetch_data_as_df(query=query)
 
@@ -489,19 +656,17 @@ def load_manager_domain_kpis(
 
     df["kpi_facts_date"] = pd.to_datetime(df["kpi_facts_date"])
 
-    # Tag each row with a source category for easy filtering later
-    df["source"] = df["business_unit_label"].apply(
-        lambda bu: "country_org" if bu.startswith("Country Organisation") else "domain"
-    )
+    # source column now comes from SQL (domain, country_org, bu_aggregate)
 
     n_domain = df[df["source"] == "domain"].shape[0]
     n_country = df[df["source"] == "country_org"].shape[0]
+    n_bu_agg = df[df["source"] == "bu_aggregate"].shape[0]
     n_kpis = df["kpi_code"].nunique()
-    n_clusters = df["cluster_label"].nunique()
+    n_clusters = df[df["source"] == "domain"]["cluster_label"].nunique()
     _logger.info(
-        "Loaded %d rows (%d domain, %d country) — "
+        "Loaded %d rows (%d domain, %d country, %d bu_aggregate) — "
         "%d unique KPIs, %d clusters",
-        len(df), n_domain, n_country, n_kpis, n_clusters,
+        len(df), n_domain, n_country, n_bu_agg, n_kpis, n_clusters,
     )
     return df.sort_values(
         ["source", "business_unit_label", "kpi_code", "cluster_label", "kpi_facts_date"]
@@ -522,17 +687,172 @@ def get_domain_summary(domain_df: pd.DataFrame) -> dict:
 
     domain = domain_df[domain_df["source"] == "domain"]
     country = domain_df[domain_df["source"] == "country_org"]
+    bu_agg = domain_df[domain_df["source"] == "bu_aggregate"]
 
     return {
-        "business_unit": domain["business_unit_label"].iloc[0] if len(domain) > 0 else None,
+        "business_unit": domain["business_unit_label"].iloc[0] if len(domain) > 0 else (
+            bu_agg["business_unit_label"].iloc[0] if len(bu_agg) > 0 else None
+        ),
         "domain_kpi_codes": sorted(domain["kpi_code"].unique().tolist()),
         "domain_clusters": sorted(domain["cluster_label"].dropna().unique().tolist()),
         "country_bus": sorted(country["business_unit_label"].unique().tolist()),
         "country_geos": sorted(country["cluster_label"].dropna().unique().tolist()),
         "country_kpi_codes": sorted(country["kpi_code"].unique().tolist()),
+        "bu_aggregate_kpi_codes": sorted(bu_agg["kpi_code"].unique().tolist()),
         "date_range": (
             domain_df["kpi_facts_date"].min().strftime("%Y-%m"),
             domain_df["kpi_facts_date"].max().strftime("%Y-%m"),
         ),
     }
+
+
+# =====================================================================
+# Root Cause Analysis (RCA) — MNS ← PPL correlation
+# =====================================================================
+
+def prepare_rca_data(
+    ppl_data: pd.DataFrame,
+    domain_df: pd.DataFrame,
+) -> tuple[dict, dict[str, pd.DataFrame]]:
+    """Reshape PPL + MNS KPIs into the format expected by RootCauseAnalysis.
+
+    * **Mother table** (effect): MNS BU-aggregate KPIs — one time series
+      per ``kpi_code``.
+    * **Node tables** (potential causes): one per PPL KPI — a single
+      aggregated time series across all teams.
+
+    Both are normalised to first-of-month dates so they align.
+
+    Args:
+        ppl_data: DataFrame from ``load_manager_team_kpis()``.
+        domain_df: DataFrame from ``load_manager_domain_kpis()``.
+
+    Returns:
+        ``(config_dict, df_dict)`` ready for
+        ``RootCauseAnalysis.rca_calculation()``.
+    """
+    # --- Mother: MNS KPIs (prefer bu_aggregate, fallback to domain) ---
+    bu_agg = domain_df[domain_df["source"] == "bu_aggregate"].copy()
+    if len(bu_agg) == 0:
+        bu_agg = domain_df[domain_df["source"] == "domain"].copy()
+
+    if len(bu_agg) == 0:
+        _logger.warning("No MNS KPIs available for RCA")
+        return {"mother_table": {"name": "mns"}, "node_tables": {}}, {}
+
+    # Normalise dates to first-of-month
+    bu_agg["date_col"] = pd.to_datetime(bu_agg["kpi_facts_date"]).dt.to_period("M").dt.to_timestamp()
+    mother_df = (
+        bu_agg.rename(columns={"kpi_code": "id_kpi_code", "kpi_value": "value_col"})
+        [["id_kpi_code", "date_col", "value_col"]]
+        .dropna(subset=["value_col"])
+        .drop_duplicates(subset=["id_kpi_code", "date_col"])
+        .sort_values(["id_kpi_code", "date_col"])
+        .reset_index(drop=True)
+    )
+    # Dummy link column — the library's filter_dataframe crashes with
+    # empty id_link (mask stays as scalar True instead of boolean Series).
+    mother_df["id_all"] = "ALL"
+
+    # --- Nodes: aggregated PPL KPIs ---
+    agg = aggregate_team_kpis(ppl_data)
+    if len(agg) == 0:
+        _logger.warning("No PPL KPIs available for RCA")
+        return {"mother_table": {"name": "mns"}, "node_tables": {}}, {}
+
+    agg["date_col"] = pd.to_datetime(agg["month"]).dt.to_period("M").dt.to_timestamp()
+
+    ppl_cols = [c for c in PPL_CORRELATABLE_KPIS if c in agg.columns]
+
+    df_dict: dict[str, pd.DataFrame] = {"mns": mother_df}
+    node_tables: dict = {}
+
+    for kpi_col in ppl_cols:
+        node_df = (
+            agg[["date_col", kpi_col]]
+            .rename(columns={kpi_col: "value_col"})
+            .dropna(subset=["value_col"])
+            .sort_values("date_col")
+            .reset_index(drop=True)
+        )
+        # Granger needs at least ~7 observations for meaningful tests
+        if len(node_df) < 7:
+            continue
+
+        node_df["id_all"] = "ALL"
+        df_dict[kpi_col] = node_df
+        node_tables[kpi_col] = {
+            "name": kpi_col,
+            "bridge_df": {"apply": False, "data_paths": {}},
+            "id_link": {"id_all": "id_all"},
+            "apply_condition": {"name": None, "utils_module": None},
+        }
+
+    config = {
+        "mother_table": {"name": "mns"},
+        "node_tables": node_tables,
+    }
+
+    n_mns = mother_df["id_kpi_code"].nunique()
+    n_ppl = len(node_tables)
+    n_dates = mother_df["date_col"].nunique()
+    _logger.info(
+        "RCA prepared: %d MNS KPIs × %d PPL KPIs, %d months",
+        n_mns, n_ppl, n_dates,
+    )
+    return config, df_dict
+
+
+def run_correlation(
+    ppl_data: pd.DataFrame,
+    domain_df: pd.DataFrame,
+    max_lag: int = 6,
+) -> pd.DataFrame:
+    """Run Root Cause Analysis: MNS KPIs (effect) vs PPL KPIs (cause).
+
+    Wraps ``aily_ai_correlator.root_cause.RootCauseAnalysis`` using
+    BU-aggregate MNS KPIs as the mother (effect) and aggregated PPL KPIs
+    as node tables (potential causes).
+
+    Only pairs that pass Granger Causality and/or Transfer Entropy are
+    returned.
+
+    Args:
+        ppl_data: DataFrame from ``load_manager_team_kpis()``.
+        domain_df: DataFrame from ``load_manager_domain_kpis()``.
+        max_lag: Maximum lag (months) for the Granger test.  Default 6.
+
+    Returns:
+        DataFrame with columns: id_kpi_code (MNS), kpi (PPL KPI name),
+        min_p_value, transfer_entropy, explained_entropy, lag.
+        Empty DataFrame if no significant correlations found.
+    """
+    from aily_ai_correlator.root_cause.root_cause_analysis import RootCauseAnalysis
+
+    config, df_dict = prepare_rca_data(ppl_data, domain_df)
+
+    if not config["node_tables"]:
+        _logger.warning("No PPL KPIs eligible for RCA — not enough data points")
+        return pd.DataFrame()
+
+    _logger.info(
+        "Running RCA: %d node KPIs, max_lag=%d …",
+        len(config["node_tables"]), max_lag,
+    )
+    rca = RootCauseAnalysis(conf_dict=config, max_lag_permitted=max_lag)
+    result = rca.rca_calculation(df_dict=df_dict)
+
+    if len(result) > 0:
+        # Sort by strongest signal (lowest p-value, highest entropy)
+        result = (
+            result
+            .sort_values(["id_kpi_code", "min_p_value", "explained_entropy"],
+                         ascending=[True, True, False])
+            .reset_index(drop=True)
+        )
+        _logger.info("RCA found %d significant correlations", len(result))
+    else:
+        _logger.info("RCA: no significant correlations found")
+
+    return result
 

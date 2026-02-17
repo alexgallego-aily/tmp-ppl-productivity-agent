@@ -68,6 +68,29 @@ TEAM_KPI_PANELS: list[tuple[str, str, list[int] | None, bool]] = [
     ('avg_span_of_control',          'Avg Span of Control',          None,      False),
 ]
 
+# ── PPL KPIs available for correlation analysis ────────────────────
+# All numeric PPL KPI columns that make sense as time-series signals.
+PPL_CORRELATABLE_KPIS: list[str] = [
+    "headcount",
+    "attrition_rate_pct",
+    "avg_age",
+    "pct_near_retirement",
+    "avg_tenure_years",
+    "avg_time_in_position_years",
+    "pct_female",
+    "team_health_score",
+    "development_score",
+    "mobility_score",
+    "succession_score",
+    "pct_ready_for_promotion",
+    "pct_succession_candidates",
+    "pct_high_retention_risk",
+    "pct_critical_flight_risk",
+    "pct_managers",
+    "avg_span_of_control",
+    "pct_long_in_position",
+]
+
 # Colour palette for teams (hex, enough for ≤16 teams)
 TEAM_PALETTE = [
     '#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3',

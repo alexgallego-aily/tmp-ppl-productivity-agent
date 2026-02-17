@@ -28,9 +28,13 @@ from src import (
     load_manager_domain_kpis,
     get_domain_summary,
     resolve_business_unit,
+    aggregate_team_kpis,
+    apply_team_size_filter,
+    run_correlation,
     plot_manager_team_dashboard,
     plot_domain_kpi_dashboard,
     KPI_MAPPING_LABELS,
+    MIN_TEAM_HEADCOUNT,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
@@ -68,9 +72,11 @@ def _run_interactive():
     dal = Dal()
 
     # Session state
-    candidates = None    # DataFrame from find
-    profile = None        # dict from get_manager_profile
-    mns_clusters = None   # list of available clusters for the profile's BU
+    candidates = None      # DataFrame from find
+    profile = None          # dict from get_manager_profile
+    mns_clusters = None     # list of available clusters for the profile's BU
+    last_ppl_data = None    # DataFrame from kpis (for correlate)
+    last_domain_df = None   # DataFrame from kpis (for correlate)
 
     _print_banner()
 
@@ -159,8 +165,35 @@ def _run_interactive():
             dal = _ensure_dal(dal)
             show_all_teams = "--all" in rest
             kpi_rest = rest.replace("--all", "").strip()
+
+            # Auto-load clusters if user passed indices but clusters aren't loaded
+            if kpi_rest.strip() and mns_clusters is None and profile.get("kpi_mapping"):
+                bu = resolve_business_unit(profile["kpi_mapping"])
+                print(f"  Loading clusters for {bu}…")
+                mns_clusters = get_available_mns_clusters(bu, dal=dal)
+
             selected_bu_clusters = _parse_cluster_selection(kpi_rest, mns_clusters)
-            _interactive_kpis(profile, selected_bu_clusters, dal, active_teams_only=not show_all_teams)
+            if kpi_rest.strip() and selected_bu_clusters is None and mns_clusters is not None:
+                print(f"  {_G}Invalid cluster indices. Use 'clusters' to see available.{_D}")
+                continue
+
+            last_ppl_data, last_domain_df = _interactive_kpis(
+                profile, selected_bu_clusters, dal, active_teams_only=not show_all_teams,
+            )
+
+            if last_ppl_data is not None and last_domain_df is not None and len(last_domain_df) > 0:
+                print(f"\n  {_B}Tip:{_D} Type {_B}'correlate'{_D} to run Root Cause Analysis (MNS ← PPL)."
+                      f"  Use {_B}'correlate --lag 12'{_D} to change max lag.")
+
+        # ── correlate  (RCA: MNS ← PPL) ─────────────────────────
+        elif cmd == "correlate":
+            if last_ppl_data is None:
+                print("  Run 'kpis' first to load data.")
+                continue
+            if last_domain_df is None or len(last_domain_df) == 0:
+                print("  No domain KPIs available. Run 'kpis' with a valid kpi_mapping.")
+                continue
+            _interactive_correlate(last_ppl_data, last_domain_df, rest, profile)
 
         # ── help ──────────────────────────────────────────────────
         elif cmd in ("help", "h", "?"):
@@ -179,7 +212,7 @@ def _print_banner():
     print(f"""
 {_B}PPL Manager Analytics — Interactive Console{_D}
 {'─' * 50}
-Commands: find, select, profile, clusters, kpis, help, quit
+Commands: find, select, profile, clusters, kpis, correlate, help, quit
 """)
 
 
@@ -204,6 +237,7 @@ def _print_help():
   {_B}kpis{_D} [opts] [idx]     Generate PPL + domain KPI dashboards (Plotly)
                           By default shows only {_B}active teams{_D} (latest month).
                           --all           Include historical/inactive teams too
+                          Teams with < {MIN_TEAM_HEADCOUNT} people are aggregated only (not shown individually).
 
                           {_B}Domain KPIs:{_D} two sources combined automatically:
                           1. BU KPIs — all clusters for the detected BU
@@ -216,10 +250,15 @@ def _print_help():
                             kpis 0 3 5         (only clusters at those indices)
                           Without indices: all BU clusters
 
+  {_B}correlate{_D} [opts]      Root Cause Analysis: MNS KPIs (effect) vs PPL KPIs (cause)
+                          Requires 'kpis' to have been run first.
+                          --lag N   Max lag in months (default 6)
+                          Only shows pairs with significant signal.
+
   {_B}help{_D}                  Show this help
   {_B}quit{_D}                  Exit
 
-{_B}Workflow:{_D}  find → select N → profile → (set-kpi / clusters) → kpis
+{_B}Workflow:{_D}  find → select N → profile → (set-kpi / clusters) → kpis → correlate
 """)
 
 
@@ -262,14 +301,23 @@ def _interactive_find(filter_str: str, dal) -> "pd.DataFrame | None":
     )
 
     if len(results) == 0:
-        print("  No candidates found.")
+        is_manager_filter = not args.include_non_managers
+        if is_manager_filter:
+            print("  No candidates found (with is_manager=TRUE filter).")
+            print(f"  {_G}Try: find {filter_str} --include-non-managers{_D}")
+        else:
+            print("  No candidates found.")
         return None
 
-    print(f"\n  Found {_B}{len(results)}{_D} candidate(s):\n")
+    is_manager_filter = not args.include_non_managers
+    filter_note = f" {_G}(is_manager=TRUE){_D}" if is_manager_filter else ""
+    print(f"\n  Found {_B}{len(results)}{_D} candidate(s){filter_note}:\n")
     for i, row in results.head(20).iterrows():
+        mgr_flag = "✓ mgr" if row.get("is_manager") else "✗ not mgr"
         print(
             f"  {_B}[{i}]{_D} {row['employee_code'][:40]}…\n"
             f"      {row.get('employees_managed', '?')} reports | "
+            f"{mgr_flag} | "
             f"{row.get('management_level_code', '')} | "
             f"{row.get('geo_code', '')}\n"
             f"      Location: {row.get('location', '')}\n"
@@ -279,6 +327,11 @@ def _interactive_find(filter_str: str, dal) -> "pd.DataFrame | None":
         )
     if len(results) > 20:
         print(f"\n  … and {len(results) - 20} more. Narrow your filters.")
+
+    # Hint when few results with manager filter
+    is_manager_filter = not args.include_non_managers
+    if is_manager_filter and len(results) <= 3:
+        print(f"\n  {_G}Few results? Try: find {filter_str} --include-non-managers{_D}")
 
     print(f"\n  {_G}Type a number to select a candidate (e.g. '0'){_D}")
     return results.reset_index(drop=True)
@@ -373,8 +426,12 @@ def _interactive_kpis(
     bu_clusters: "list[str] | None",
     dal,
     active_teams_only: bool = True,
-):
-    """Generate PPL + domain dashboards for the current profile."""
+) -> "tuple[pd.DataFrame | None, pd.DataFrame | None]":
+    """Generate PPL + domain dashboards for the current profile.
+
+    Returns (ppl_data, domain_df) so that the interactive loop can
+    reuse them for downstream commands like ``correlate``.
+    """
     manager_code = profile["employee_code"]
     geo_codes = profile["geo_codes"]
     kpi_mapping = profile.get("kpi_mapping")
@@ -385,7 +442,7 @@ def _interactive_kpis(
 
     if len(data) == 0:
         print("  No PPL data found.")
-        return
+        return None, None
 
     # Filter to active teams (present in the latest month) by default
     all_teams_count = data.groupby(["organization_level_code", "geo_code"]).ngroups
@@ -402,9 +459,32 @@ def _interactive_kpis(
                 f"(of {all_teams_count} total). Use 'kpis --all' to see all."
             )
 
-    summary = get_manager_summary(data)
+    # Apply team-size filter:
+    #   - Always show aggregate (ALL)
+    #   - Only show individual teams with >= MIN_TEAM_HEADCOUNT people
+    raw_data = data  # keep unfiltered for correlate later
+    data = apply_team_size_filter(data, min_headcount=MIN_TEAM_HEADCOUNT)
+
+    # Report what happened
+    latest_month = raw_data["month"].max()
+    latest_raw = raw_data[raw_data["month"] == latest_month]
+    total_teams = latest_raw.groupby(["organization_level_code", "geo_code"]).ngroups
+    big_teams = latest_raw.groupby(["organization_level_code", "geo_code"])["headcount"].first()
+    n_big = (big_teams >= MIN_TEAM_HEADCOUNT).sum()
+    n_small = total_teams - n_big
+    if n_small > 0:
+        print(
+            f"  {_G}{n_small} team(s) with < {MIN_TEAM_HEADCOUNT} people → "
+            f"only in aggregate.{_D}"
+        )
     print(
-        f"  Teams: {summary['n_teams']} | "
+        f"  Showing: {_B}ALL (aggregate){_D}"
+        + (f" + {_B}{n_big}{_D} individual team(s)" if n_big > 0 else "")
+    )
+
+    summary = get_manager_summary(raw_data)
+    print(
+        f"  Total teams: {total_teams} | "
         f"Geos: {', '.join(summary['geos'])} | "
         f"HC: {summary['total_headcount']} | "
         f"Period: {summary['months_range'][0]} → {summary['months_range'][1]}"
@@ -418,7 +498,7 @@ def _interactive_kpis(
     if not kpi_mapping:
         print(f"\n  {_G}No kpi_mapping detected. Skipping domain KPIs.{_D}")
         print(f"  {_G}To set manually, update profile['kpi_mapping'] or use direct mode.{_D}")
-        return
+        return raw_data, None
 
     bu = resolve_business_unit(kpi_mapping)
     cluster_desc = f"{len(bu_clusters)} selected" if bu_clusters else "all"
@@ -430,12 +510,14 @@ def _interactive_kpis(
 
     if len(domain_df) == 0:
         print("  No domain KPIs found.")
-        return
+        return raw_data, None
 
     dsummary = get_domain_summary(domain_df)
+    bu_agg_count = len(dsummary.get("bu_aggregate_kpi_codes", []))
     print(
         f"  BU clusters: {len(dsummary['domain_clusters'])} | "
         f"BU KPIs: {len(dsummary['domain_kpi_codes'])} | "
+        f"BU aggregate: {bu_agg_count} | "
         f"Country matches: {', '.join(dsummary['country_geos']) or 'none'} | "
         f"Dates: {dsummary['date_range'][0]} → {dsummary['date_range'][1]}"
     )
@@ -451,11 +533,82 @@ def _interactive_kpis(
     else:
         _print_domain_kpi_sample(domain_df)
 
+    return raw_data, domain_df
+
+
+# ── correlate ────────────────────────────────────────────────────
+
+def _interactive_correlate(ppl_data, domain_df, rest: str, profile: dict):
+    """Run Root Cause Analysis and display results in the console."""
+    import shlex
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--lag", type=int, default=6)
+    try:
+        opts = parser.parse_args(shlex.split(rest) if rest.strip() else [])
+    except SystemExit:
+        print("  Usage: correlate [--lag N]")
+        return
+
+    max_lag = opts.lag
+    print(f"\n  {_B}Root Cause Analysis{_D} (MNS → PPL, max_lag={max_lag})")
+    print(f"  {'─' * 50}")
+
+    result = run_correlation(ppl_data, domain_df, max_lag=max_lag)
+
+    if len(result) == 0:
+        print(f"  {_G}No significant correlations found.{_D}")
+        print("  This means no PPL KPI passed the Granger Causality or")
+        print("  Transfer Entropy tests against the MNS domain KPIs.")
+        return
+
+    # Display results grouped by MNS KPI
+    manager_label = profile.get("kpi_mapping_label", "")
+    print(f"  Domain: {_B}{manager_label}{_D}")
+    print(f"  Found {_B}{len(result)}{_D} significant correlations:\n")
+
+    prev_mns = None
+    for _, row in result.iterrows():
+        mns_kpi = row.get("id_kpi_code", "?")
+        ppl_kpi = row.get("kpi", "?")
+        p_val = row.get("min_p_value", 0)
+        te = row.get("transfer_entropy", 0)
+        ee = row.get("explained_entropy", 0)
+        lag = row.get("lag", 0)
+
+        if mns_kpi != prev_mns:
+            print(f"  {_B}MNS KPI: {mns_kpi}{_D}")
+            prev_mns = mns_kpi
+
+        # Signal strength indicator
+        if ee > 0.3:
+            signal = "***"
+        elif ee > 0.1:
+            signal = "** "
+        else:
+            signal = "*  "
+
+        print(
+            f"    {signal} {ppl_kpi:<35s}  "
+            f"p={p_val:.4f}  "
+            f"TE={te:.3f}  "
+            f"EE={ee:.3f}  "
+            f"lag={int(lag)}m"
+        )
+
+    print(f"\n  {_G}Signal: * Granger only, ** TE>0.1, *** TE>0.3{_D}")
+    print(f"  {_G}p = Granger p-value, TE = Transfer Entropy, EE = Explained Entropy{_D}")
+    print(f"  {_G}lag = months of delay from PPL cause to MNS effect{_D}")
+
 
 def _print_domain_kpi_sample(domain_df):
     """Print a compact sample of available domain KPIs."""
     import pandas as pd
-    for source_label, source_key in [("BU KPIs", "domain"), ("Country KPIs", "country_org")]:
+    for source_label, source_key in [
+        ("BU KPIs (per cluster)", "domain"),
+        ("BU KPIs (aggregate)", "bu_aggregate"),
+        ("Country KPIs", "country_org"),
+    ]:
         subset = domain_df[domain_df["source"] == source_key]
         if len(subset) == 0:
             continue

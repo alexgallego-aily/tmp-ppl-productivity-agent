@@ -5,6 +5,7 @@ description = "PPL Productivity Analytics — Manager KPIs × Business KPIs"
 readme = "README.md"
 requires-python = ">=3.11, <3.12"
 dependencies = [
+    "aily-ai-correlator>=2.0.1",
     "aily-data-access-layer>=2.34.0",
     "aily-py-commons>=1.6.9",
     "pandas>=2.0.0",

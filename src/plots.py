@@ -235,14 +235,25 @@ def plot_domain_kpi_dashboard(
         .reset_index()
     )
 
-    # Collect BU KPIs first, then Country Org
+    # Collect BU KPIs per-cluster, BU aggregate, then Country Org
     bu_kpis = kpi_rank[kpi_rank["source"] == "domain"]["kpi_code"].tolist()
+    ba_kpis = kpi_rank[kpi_rank["source"] == "bu_aggregate"]["kpi_code"].tolist()
     co_kpis = kpi_rank[kpi_rank["source"] == "country_org"]["kpi_code"].tolist()
 
-    # Limit total panels
-    selected_bu = bu_kpis[: MAX_DOMAIN_PANELS // 2] if len(co_kpis) > 0 else bu_kpis[: MAX_DOMAIN_PANELS]
-    selected_co = co_kpis[: MAX_DOMAIN_PANELS - len(selected_bu)]
-    all_kpis = [(kpi, "domain") for kpi in selected_bu] + [(kpi, "country_org") for kpi in selected_co]
+    # Limit total panels — balance across sources
+    n_sources = sum(1 for lst in [bu_kpis, ba_kpis, co_kpis] if lst)
+    per_source = MAX_DOMAIN_PANELS // max(n_sources, 1)
+    selected_bu = bu_kpis[:per_source] if n_sources > 1 else bu_kpis[:MAX_DOMAIN_PANELS]
+    remaining = MAX_DOMAIN_PANELS - len(selected_bu)
+    selected_ba = ba_kpis[:remaining // 2] if co_kpis else ba_kpis[:remaining]
+    remaining -= len(selected_ba)
+    selected_co = co_kpis[:remaining]
+
+    all_kpis = (
+        [(kpi, "domain") for kpi in selected_bu]
+        + [(kpi, "bu_aggregate") for kpi in selected_ba]
+        + [(kpi, "country_org") for kpi in selected_co]
+    )
 
     if not all_kpis:
         return None
@@ -251,9 +262,10 @@ def plot_domain_kpi_dashboard(
     n_cols = 2
     n_rows = (n_panels + n_cols - 1) // n_cols
 
+    _source_prefix = {"domain": "BU", "bu_aggregate": "BU Agg", "country_org": "Country"}
     titles = []
     for kpi_code, source in all_kpis:
-        prefix = "BU" if source == "domain" else "Country"
+        prefix = _source_prefix.get(source, source)
         titles.append(f"{prefix}: {kpi_code}")
 
     # pad to even
@@ -270,6 +282,8 @@ def plot_domain_kpi_dashboard(
 
     # ── Colour map per cluster ─────────────────────────────────────
     all_clusters = sorted(domain_df["cluster_label"].dropna().unique())
+    # Display-friendly name for the sentinel aggregate label
+    _display_name = lambda cl: "BU Total" if cl == "__BU_AGGREGATE__" else cl
     cluster_colors = {
         cl: _DOMAIN_CLUSTER_PALETTE[i % len(_DOMAIN_CLUSTER_PALETTE)]
         for i, cl in enumerate(all_clusters)
@@ -291,17 +305,21 @@ def plot_domain_kpi_dashboard(
         for cl in sorted(subset["cluster_label"].dropna().unique()):
             cl_data = subset[subset["cluster_label"] == cl].sort_values("kpi_facts_date")
             color = cluster_colors.get(cl, "#999999")
-            show_legend = cl not in shown_legends
-            shown_legends.add(cl)
+            cl_label = _display_name(cl)
+            show_legend = cl_label not in shown_legends
+            shown_legends.add(cl_label)
+
+            # BU aggregate gets a thicker line
+            line_width = 3 if cl == "__BU_AGGREGATE__" else 2
 
             fig.add_trace(
                 go.Scatter(
                     x=cl_data["kpi_facts_date"],
                     y=cl_data["kpi_value"],
-                    name=cl,
+                    name=cl_label,
                     mode="lines+markers",
-                    line=dict(color=color, width=2),
-                    legendgroup=cl,
+                    line=dict(color=color, width=line_width),
+                    legendgroup=cl_label,
                     showlegend=show_legend,
                 ),
                 row=row, col=col,
@@ -313,10 +331,10 @@ def plot_domain_kpi_dashboard(
                     go.Scatter(
                         x=cl_data["kpi_facts_date"],
                         y=cl_data["target_value"],
-                        name=f"{cl} target",
+                        name=f"{cl_label} target",
                         mode="lines",
                         line=dict(color=color, width=1.2, dash="dot"),
-                        legendgroup=cl,
+                        legendgroup=cl_label,
                         showlegend=False,
                     ),
                     row=row, col=col,
@@ -324,6 +342,7 @@ def plot_domain_kpi_dashboard(
 
     # ── layout ─────────────────────────────────────────────────────
     n_bu = len(selected_bu)
+    n_ba = len(selected_ba)
     n_co = len(selected_co)
     date_range = (
         f"{domain_df['kpi_facts_date'].min().strftime('%Y-%m')} → "
@@ -335,7 +354,7 @@ def plot_domain_kpi_dashboard(
         title_text=(
             f"Domain KPIs: {kpi_mapping_label or business_unit}<br>"
             f"<sub>Manager: {manager_code[:40]}… | "
-            f"{n_bu} BU KPIs · {n_co} Country KPIs · "
+            f"{n_bu} BU · {n_ba} BU Agg · {n_co} Country KPIs · "
             f"{len(all_clusters)} clusters · {date_range}</sub>"
         ),
         showlegend=True,

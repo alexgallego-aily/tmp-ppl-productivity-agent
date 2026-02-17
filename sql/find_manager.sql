@@ -11,7 +11,7 @@ SELECT DISTINCT
     is_manager,
     employees_managed,
 
-    -- Descriptive fields from extra JSON (cast to TEXT for SPLIT_PART)
+    -- Descriptive fields from extra JSON
     TRIM(SPLIT_PART(SPLIT_PART(extra::TEXT, '"Location": "', 2), '"', 1))
         AS location,
     TRIM(REGEXP_REPLACE(
@@ -36,3 +36,4 @@ WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM data_normalized.ppl_employ
   AND is_artificial_record = FALSE
   {where_clause}
 ORDER BY employees_managed DESC NULLS LAST, employee_code
+LIMIT 50

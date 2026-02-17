@@ -120,6 +120,7 @@ Adding GTM, Finance, R&D... = SQL + config + mapping. Tool signatures don't chan
 │     kpis()               │  │                        │
 │   get_available_mns_     │  │                        │
 │     clusters()           │  │                        │
+│   run_correlation()      │  │                        │
 └──────────────┬──────────┘  └────────────────────────┘
                │
 ┌──────────────▼──────────┐
@@ -142,6 +143,7 @@ Each CLI command maps 1:1 to a future MCP tool:
 | `select 0` / `profile <hash>` | `get_manager_profile(manager_code)` | `get_manager_profile` |
 | `clusters` | `get_available_mns_clusters(business_unit)` | `get_available_clusters` |
 | `kpis` | `load_manager_team_kpis()` + `load_manager_domain_kpis()` | `get_manager_kpis` |
+| `correlate` | `run_correlation(ppl_data, domain_df)` | `detect_cross_domain_correlations` |
 
 The functions in `src/data.py` return structured dicts/DataFrames — ready for MCP tool wrapping.
 
@@ -169,7 +171,7 @@ uv run python main.py
 ### Workflow
 
 ```
-find → select N → profile → (clusters) → kpis
+find → select N → profile → (clusters) → kpis → correlate
 ```
 
 ### Commands
@@ -224,6 +226,54 @@ Or go direct with a known hash:
 This generates two Plotly dashboards:
 - **PPL Team KPIs**: 18 panels (headcount, attrition, health, diversity, risk, etc.) with one line per team
 - **Domain KPIs**: BU-specific + Country Organisation KPIs with one line per cluster and dashed targets
+
+After `kpis`, the console suggests running `correlate`.
+
+**7. Root Cause Analysis** (correlation: MNS effect ← PPL cause)
+
+```
+> correlate                # Default max_lag=6 months
+> correlate --lag 12       # Override to 12 months
+```
+
+Uses `aily-ai-correlator` (Granger Causality + Transfer Entropy) to check if changes in PPL KPIs (people) precede changes in MNS KPIs (production). The question it answers: **"production drops — is it people-related?"**
+
+#### Interpreting results
+
+Each row is a (MNS KPI, PPL KPI) pair with significant signal:
+
+| Column | What it is | How to read it |
+|---|---|---|
+| **MNS KPI** | Business/production KPI (effect) | Grouper: rows below are potential causes |
+| **PPL KPI** | People KPI (potential cause) | The indicator that may be driving the MNS change |
+| **p** | Granger Causality p-value | Lower = more significant. `< 0.05` = strong |
+| **TE** | Transfer Entropy | How much information flows PPL → MNS. Higher = stronger |
+| **EE** | Explained Entropy | Fraction of MNS variability explained by PPL (0 to 1) |
+| **lag** | Lag in months | Delay between PPL change and MNS impact |
+
+Signal strength indicators:
+
+| Signal | Meaning |
+|---|---|
+| `*` | Passed Granger test only (TE < 0.1) |
+| `**` | Transfer Entropy > 0.1 (moderate relationship) |
+| `***` | Transfer Entropy > 0.3 (strong relationship) |
+
+Example output:
+
+```
+  MNS KPI: OTIF_RATE
+    ***  attrition_rate_pct                 p=0.0012  TE=0.420  EE=0.350  lag=3m
+    **   avg_tenure_years                   p=0.0230  TE=0.150  EE=0.120  lag=2m
+    *    pct_female                          p=0.0480  TE=0.060  EE=0.040  lag=5m
+```
+
+Reading this:
+- **Attrition rate** has a **strong** (`***`) link to OTIF. Changes in attrition precede OTIF drops by **3 months**, explaining 35% of its variability.
+- **Average tenure** has a **moderate** (`**`) link with 2-month lag.
+- **% female** has a **weak** (`*`) signal — likely spurious.
+
+Focus on `***` and `**` pairs. The **lag** tells you how far in advance the people signal predicts the business impact. Results with `p > 0.05` are already filtered out.
 
 ### How domain KPIs work
 
@@ -318,9 +368,9 @@ ppl/
 ├── main.py                     # Entry point (interactive CLI + direct commands)
 ├── src/
 │   ├── __init__.py             # Public API
-│   ├── data.py                 # Data loading functions (future MCP tools)
+│   ├── data.py                 # Data loading, aggregation, correlation (future MCP tools)
 │   ├── plots.py                # Plotly dashboards (PPL + Domain)
-│   ├── config.py               # KPI panel defs, mapping rules, palettes
+│   ├── config.py               # KPI panel defs, mapping rules, correlatable KPIs, palettes
 │   └── paths.py                # Path constants
 ├── sql/
 │   ├── find_manager.sql        # Manager lookup by descriptive filters

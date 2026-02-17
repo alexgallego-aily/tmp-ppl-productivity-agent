@@ -16,6 +16,12 @@ from .data import (
     load_manager_domain_kpis,
     get_domain_summary,
     resolve_business_unit,
+    aggregate_team_kpis,
+    apply_team_size_filter,
+    prepare_rca_data,
+    run_correlation,
+    MIN_TEAM_HEADCOUNT,
+    DEFAULT_DOMAIN_LOOKBACK_YEARS,
 )
 
 # ── Plotly visualizations ────────────────────────────────────────
@@ -30,5 +36,6 @@ from .config import (
     TEAM_PALETTE,
     KPI_MAPPING_LABELS,
     KPI_MAPPING_RULES,
+    PPL_CORRELATABLE_KPIS,
     suggest_kpi_mapping,
 )

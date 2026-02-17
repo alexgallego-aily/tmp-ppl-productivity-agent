@@ -4,12 +4,11 @@
 --
 -- Returns columns for both the manager's self info AND aggregated
 -- context from their direct reports (GBU, L2, L3, function).
--- Active team breakdown is done in a separate query.
 
 WITH latest_snap AS (
+    -- No filter here so Redshift can use sort-key for MAX
     SELECT MAX(snapshot_date) AS snap
     FROM data_normalized.ppl_employees
-    WHERE is_artificial_record = FALSE
 )
 
 SELECT
@@ -34,7 +33,6 @@ SELECT
     ))) AS primary_function,
 
     -- Aggregated context from direct reports (more reliable for domain detection)
-    -- GBU fields (sometimes populated when Level_From_Top is empty, or vice versa)
     MODE() WITHIN GROUP (ORDER BY TRIM(REGEXP_REPLACE(
         SPLIT_PART(SPLIT_PART(rpt.extra::TEXT, '"GBU_Level_1": "', 2), '"', 1),
         '\s*\([^)]*\)\s*$', ''
@@ -47,7 +45,6 @@ SELECT
         SPLIT_PART(SPLIT_PART(rpt.extra::TEXT, '"GBU_Level_3": "', 2), '"', 1),
         '\s*\([^)]*\)\s*$', ''
     ))) AS reports_gbu_level_3,
-    -- Level_From_Top fields
     MODE() WITHIN GROUP (ORDER BY
         SPLIT_PART(SPLIT_PART(rpt.extra::TEXT, '"Level_02_From_Top": "', 2), '"', 1)
     ) AS reports_level_02,
@@ -58,7 +55,6 @@ SELECT
         SPLIT_PART(SPLIT_PART(rpt.extra::TEXT, '"Level_04_From_Top": "', 2), '"', 1)
     ) AS reports_level_04,
 
-    -- Report count
     COUNT(DISTINCT rpt.employee_code) AS direct_report_count
 
 FROM latest_snap ls
