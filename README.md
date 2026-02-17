@@ -239,6 +239,21 @@ After `kpis`, the console suggests running `correlate`.
 
 Uses `aily-ai-correlator` (Granger Causality + Transfer Entropy) to check if changes in PPL KPIs (people) precede changes in MNS KPIs (production). The question it answers: **"production drops — is it people-related?"**
 
+#### How the data is prepared for correlation
+
+Both sides are **aggregated** to produce one time series per KPI:
+
+| Side | Source | Aggregation | What it represents |
+|---|---|---|---|
+| **MNS (effect)** | `bu_aggregate` from domain KPIs (fallback: `domain`) | All clusters summed per (kpi_code, date) | Overall BU performance, not per-cluster |
+| **PPL (cause)** | `aggregate_team_kpis()` on raw PPL data | All teams summed per month | Overall people metrics for the manager's org |
+
+This means the correlation operates at the **global level of the manager's scope** — not per-team or per-cluster. Per-cluster or per-team correlations would require enough data points in each slice, which is rarely available.
+
+The 18 PPL KPIs in `PPL_CORRELATABLE_KPIS` (headcount, attrition, tenure, health scores, etc.) are each tested against **every** MNS KPI. Only pairs that pass Granger Causality (p < 0.05) are returned.
+
+**Note**: The correlation tells you **whether** a relationship exists and **how strong** it is, but not whether it is **positive or negative**. Use `explore N` to visually inspect the direction (see "Possible improvements" for planned Pearson r addition).
+
 #### Interpreting results
 
 Each row is a (MNS KPI, PPL KPI) pair with significant signal:
