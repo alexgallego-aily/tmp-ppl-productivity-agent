@@ -388,6 +388,33 @@ uv run python main.py --manager <hash>
 uv run python main.py --manager <hash> --kpi-mapping MSLT_GENERAL_MEDICINE
 ```
 
+### Causal survey: estimating managers with RCA
+
+Script to estimate how many managers have causal relationships PPL → MNS (RCA). Useful before scaling the agent to many managers.
+
+```bash
+# Pilot: 3 managers, sequential (see how many have insights)
+uv run python scripts/estimate_causal_managers.py --pilot
+
+# Up to 500 managers with 4 workers in parallel
+uv run python scripts/estimate_causal_managers.py --limit 500 --workers 4
+
+# Save table to CSV (re-running only adds new managers, does not overwrite)
+uv run python scripts/estimate_causal_managers.py --limit 500 -o resultados.csv
+```
+
+Output: table with manager, kpi_mapping, search text (for adding rules in config), N* N** N*** (pairs per level), status. With `-o`, the CSV is reused: managers already in the file are skipped.
+
+### Analyzing the causal survey results
+
+After generating `resultados.csv`, run the analysis for coverage and distributions:
+
+```bash
+uv run python scripts/analyze_causal_results.py resultados.csv
+```
+
+Shows: % with coverage (has_causal=True), % with * / ** / ***, breakdown by status, histograms (total insights and by *, **, ***). With matplotlib installed, saves `resultados_causal_histogram.png`. Files `resultados*.csv` and `resultados_causal_histogram.png` are in `.gitignore`.
+
 ---
 
 ## Project structure
@@ -395,6 +422,9 @@ uv run python main.py --manager <hash> --kpi-mapping MSLT_GENERAL_MEDICINE
 ```
 ppl/
 ├── main.py                     # Entry point (interactive CLI + direct commands)
+├── scripts/
+│   ├── estimate_causal_managers.py  # Survey: N managers → RCA → tabla/CSV (cache domain KPIs, incremental -o)
+│   └── analyze_causal_results.py   # Analyze resultados.csv (% coverage, by status, histograms)
 ├── src/
 │   ├── __init__.py             # Public API
 │   ├── data.py                 # Data loading, aggregation, correlation (future MCP tools)
@@ -403,6 +433,7 @@ ppl/
 │   └── paths.py                # Path constants
 ├── sql/
 │   ├── find_manager.sql        # Manager lookup by descriptive filters
+│   ├── list_managers.sql       # Bulk list for survey (limit N)
 │   ├── manager_profile.sql     # Manager self-info + reports context
 │   ├── manager_active_teams.sql# Active teams at a snapshot
 │   ├── manager_team_kpis.sql   # 21 monthly PPL KPIs per team

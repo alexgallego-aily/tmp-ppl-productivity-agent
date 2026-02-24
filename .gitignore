@@ -15,6 +15,18 @@ wheels/
 # Data files (now loaded via DAL from database)
 data/
 
+# Survey/analysis outputs (local runs, do not commit)
+resultados.csv
+resultados_causal*.csv
+resultados_causal_histogram.png
+*.png
+
+# Excel and other exports
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+
 # OS files
 .DS_Store
 
