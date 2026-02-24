@@ -44,3 +44,10 @@ from .config import (
     PPL_CORRELATABLE_KPIS,
     suggest_kpi_mapping,
 )
+
+# ── CausalImpact analysis ────────────────────────────────────────
+from .causal_impact import (
+    get_manager_hire_dates,
+    prepare_causalimpact_data,
+    analyze_manager_hire_impact,
+)
