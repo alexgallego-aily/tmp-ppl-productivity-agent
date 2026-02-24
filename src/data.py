@@ -17,7 +17,6 @@ from .config import (
     KPI_MAPPING_LABELS,
     MANAGEMENT_LEVEL_COLUMNS,
     PPL_CORRELATABLE_KPIS,
-    PPL_CORRELATABLE_KPIS,
     get_kpi_mapping_search_text,
     suggest_kpi_mapping,
 )
