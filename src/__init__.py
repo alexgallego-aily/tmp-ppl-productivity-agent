@@ -9,6 +9,7 @@ Functions here serve as building blocks for:
 # ── Data loading & analysis ──────────────────────────────────────
 from .data import (
     find_manager,
+    list_managers,
     get_manager_profile,
     get_available_mns_clusters,
     load_manager_team_kpis,

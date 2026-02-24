@@ -13,7 +13,12 @@ import pandas as pd
 from aily_data_access_layer.dal import Dal
 from aily_py_commons.io.read import read_text
 
-from .config import KPI_MAPPING_LABELS, PPL_CORRELATABLE_KPIS, suggest_kpi_mapping
+from .config import (
+    KPI_MAPPING_LABELS,
+    PPL_CORRELATABLE_KPIS,
+    get_kpi_mapping_search_text,
+    suggest_kpi_mapping,
+)
 from .paths import SQL_DIR
 
 _logger = logging.getLogger(__name__)
@@ -303,6 +308,38 @@ def find_manager(
     return df
 
 
+def list_managers(
+    limit: int = 500,
+    is_manager_only: bool = True,
+    dal: Dal | None = None,
+) -> pd.DataFrame:
+    """List manager candidates for batch processing (e.g. causal insight survey).
+
+    Args:
+        limit: Maximum number of managers to return. Capped at 10_000.
+        is_manager_only: If True, only return rows with is_manager = TRUE.
+        dal: Optional Dal instance.
+
+    Returns:
+        DataFrame with columns: employee_code, management_level_code,
+        geo_code, is_manager, employees_managed.
+    """
+    if dal is None:
+        dal = Dal()
+
+    limit = min(max(1, int(limit)), 10_000)
+    where_clause = "AND is_manager = TRUE" if is_manager_only else ""
+
+    query = _load_sql("list_managers.sql").format(
+        where_clause=where_clause,
+        limit=limit,
+    )
+    _logger.info("Listing up to %d managers (is_manager_only=%s) …", limit, is_manager_only)
+    df = dal.db.fetch_data_as_df(query=query)
+    _logger.info("Found %d manager(s)", len(df))
+    return df
+
+
 def get_manager_summary(data: pd.DataFrame) -> dict:
     """Derive a summary dict from per-team KPIs.
 
@@ -388,18 +425,20 @@ def get_manager_profile(
     # ── Derive kpi_mapping from ALL available text ───────────────
     # Pass every GBU + Level_From_Top field (self + reports) so the
     # keyword scan catches the domain regardless of which field is populated.
-    kpi_suggestion = suggest_kpi_mapping(
-        gbu_level_1=_s(s, "gbu_level_1"),
-        reports_gbu_1=_s(s, "reports_gbu_level_1"),
-        reports_gbu_2=_s(s, "reports_gbu_level_2"),
-        reports_gbu_3=_s(s, "reports_gbu_level_3"),
-        level_02=_s(s, "level_02_from_top"),
-        level_03=_s(s, "level_03_from_top"),
-        reports_level_02=_s(s, "reports_level_02"),
-        reports_level_03=_s(s, "reports_level_03"),
-        reports_level_04=_s(s, "reports_level_04"),
-        job_unit=_s(s, "primary_function"),
-    )
+    kpi_fields = {
+        "gbu_level_1": _s(s, "gbu_level_1"),
+        "reports_gbu_1": _s(s, "reports_gbu_level_1"),
+        "reports_gbu_2": _s(s, "reports_gbu_level_2"),
+        "reports_gbu_3": _s(s, "reports_gbu_level_3"),
+        "level_02": _s(s, "level_02_from_top"),
+        "level_03": _s(s, "level_03_from_top"),
+        "reports_level_02": _s(s, "reports_level_02"),
+        "reports_level_03": _s(s, "reports_level_03"),
+        "reports_level_04": _s(s, "reports_level_04"),
+        "job_unit": _s(s, "primary_function"),
+    }
+    kpi_suggestion = suggest_kpi_mapping(**kpi_fields)
+    kpi_mapping_search_text = get_kpi_mapping_search_text(**kpi_fields)
 
     return {
         "employee_code": s["employee_code"],
@@ -427,6 +466,7 @@ def get_manager_profile(
             KPI_MAPPING_LABELS.get(kpi_suggestion, "")
             if kpi_suggestion else ""
         ),
+        "kpi_mapping_search_text": kpi_mapping_search_text,
     }
 
 
