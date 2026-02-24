@@ -9,6 +9,7 @@ Functions here serve as building blocks for:
 # ── Data loading & analysis ──────────────────────────────────────
 from .data import (
     find_manager,
+    list_managers,
     get_manager_profile,
     get_available_mns_clusters,
     load_manager_team_kpis,
@@ -20,6 +21,9 @@ from .data import (
     apply_team_size_filter,
     prepare_rca_data,
     run_correlation,
+    compute_hierarchical_diversity_column,
+    hierarchical_diversity_index,
+    HIERARCHICAL_LEVEL_VALUES,
     MIN_TEAM_HEADCOUNT,
     DEFAULT_DOMAIN_LOOKBACK_YEARS,
 )

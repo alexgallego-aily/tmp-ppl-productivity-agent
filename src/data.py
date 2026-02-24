@@ -13,10 +13,94 @@ import pandas as pd
 from aily_data_access_layer.dal import Dal
 from aily_py_commons.io.read import read_text
 
-from .config import KPI_MAPPING_LABELS, PPL_CORRELATABLE_KPIS, suggest_kpi_mapping
+from .config import (
+    KPI_MAPPING_LABELS,
+    MANAGEMENT_LEVEL_COLUMNS,
+    PPL_CORRELATABLE_KPIS,
+    get_kpi_mapping_search_text,
+    suggest_kpi_mapping,
+)
 from .paths import SQL_DIR
 
 _logger = logging.getLogger(__name__)
+
+# ── Hierarchical diversity index ─────────────────────────────────
+# Numeric values for hierarchical levels (lowest to highest)
+HIERARCHICAL_LEVEL_VALUES = {
+    "Local": 1,
+    "Level 1": 2,
+    "Level 2": 3,
+    "Level 3": 4,
+    "Level 4": 5,
+    "Level 5": 6,
+    "Exec Level 1": 7,
+    "Exec Level 2": 8,
+    "Exec Comm": 9,
+}
+
+# Mapping pct_* column → level name
+_COLUMN_TO_LEVEL = {col: label for col, label in MANAGEMENT_LEVEL_COLUMNS}
+
+
+def hierarchical_diversity_index(proportions_dict: dict[str, float]) -> float:
+    """Compute weighted average distance between all pairs of levels.
+
+    Formula: Σ(prop_i * prop_j * |level_i - level_j|) for all pairs i,j.
+    Higher = more hierarchically diverse.
+
+    Args:
+        proportions_dict: dict with {level: proportion} (0-1)
+
+    Returns:
+        float: diversity index
+    """
+    total_distance = 0.0
+    levels = list(proportions_dict.keys())
+
+    for i, level_i in enumerate(levels):
+        for level_j in levels[i + 1 :]:
+            prop_i = proportions_dict.get(level_i, 0.0) or 0.0
+            prop_j = proportions_dict.get(level_j, 0.0) or 0.0
+            distance = abs(
+                HIERARCHICAL_LEVEL_VALUES.get(level_i, 0)
+                - HIERARCHICAL_LEVEL_VALUES.get(level_j, 0)
+            )
+            total_distance += prop_i * prop_j * distance
+
+    return total_distance
+
+
+def compute_hierarchical_diversity_column(data: pd.DataFrame) -> pd.DataFrame:
+    """Add hierarchical_diversity_idx column to the DataFrame.
+
+    Computes the hierarchical diversity index for each row from
+    pct_exec_comm, pct_level_1, etc. columns (values 0-100).
+
+    Args:
+        data: DataFrame with proportion columns per level
+
+    Returns:
+        DataFrame with additional hierarchical_diversity_idx column
+    """
+    df = data.copy()
+    prop_cols = [c for c, _ in MANAGEMENT_LEVEL_COLUMNS if c in df.columns]
+    if not prop_cols:
+        df["hierarchical_diversity_idx"] = None
+        return df
+
+    def _row_diversity(row: pd.Series) -> float:
+        proportions = {}
+        for col in prop_cols:
+            level = _COLUMN_TO_LEVEL.get(col)
+            if level and pd.notna(row.get(col)):
+                # Convert 0-100 to 0-1
+                proportions[level] = float(row[col]) / 100.0
+        if not proportions:
+            return None
+        return hierarchical_diversity_index(proportions)
+
+    df["hierarchical_diversity_idx"] = df.apply(_row_diversity, axis=1)
+    return df
 
 
 def _load_sql(filename: str) -> str:
@@ -61,6 +145,10 @@ def aggregate_team_kpis(data: pd.DataFrame) -> pd.DataFrame:
         "pct_succession_candidates", "pct_high_retention_risk",
         "pct_critical_flight_risk", "pct_managers", "avg_span_of_control",
         "pct_long_in_position",
+        # Management level composition
+        "pct_exec_comm", "pct_exec_level_1", "pct_exec_level_2",
+        "pct_level_1", "pct_level_2", "pct_level_3",
+        "pct_level_4", "pct_level_5", "pct_local",
     ]
     sum_cols = [c for c in sum_cols if c in data.columns]
     kpi_cols = [c for c in kpi_cols if c in data.columns]
@@ -303,6 +391,38 @@ def find_manager(
     return df
 
 
+def list_managers(
+    limit: int = 500,
+    is_manager_only: bool = True,
+    dal: Dal | None = None,
+) -> pd.DataFrame:
+    """List manager candidates for batch processing (e.g. causal insight survey).
+
+    Args:
+        limit: Maximum number of managers to return. Capped at 10_000.
+        is_manager_only: If True, only return rows with is_manager = TRUE.
+        dal: Optional Dal instance.
+
+    Returns:
+        DataFrame with columns: employee_code, management_level_code,
+        geo_code, is_manager, employees_managed.
+    """
+    if dal is None:
+        dal = Dal()
+
+    limit = min(max(1, int(limit)), 10_000)
+    where_clause = "AND is_manager = TRUE" if is_manager_only else ""
+
+    query = _load_sql("list_managers.sql").format(
+        where_clause=where_clause,
+        limit=limit,
+    )
+    _logger.info("Listing up to %d managers (is_manager_only=%s) …", limit, is_manager_only)
+    df = dal.db.fetch_data_as_df(query=query)
+    _logger.info("Found %d manager(s)", len(df))
+    return df
+
+
 def get_manager_summary(data: pd.DataFrame) -> dict:
     """Derive a summary dict from per-team KPIs.
 
@@ -388,18 +508,20 @@ def get_manager_profile(
     # ── Derive kpi_mapping from ALL available text ───────────────
     # Pass every GBU + Level_From_Top field (self + reports) so the
     # keyword scan catches the domain regardless of which field is populated.
-    kpi_suggestion = suggest_kpi_mapping(
-        gbu_level_1=_s(s, "gbu_level_1"),
-        reports_gbu_1=_s(s, "reports_gbu_level_1"),
-        reports_gbu_2=_s(s, "reports_gbu_level_2"),
-        reports_gbu_3=_s(s, "reports_gbu_level_3"),
-        level_02=_s(s, "level_02_from_top"),
-        level_03=_s(s, "level_03_from_top"),
-        reports_level_02=_s(s, "reports_level_02"),
-        reports_level_03=_s(s, "reports_level_03"),
-        reports_level_04=_s(s, "reports_level_04"),
-        job_unit=_s(s, "primary_function"),
-    )
+    kpi_fields = {
+        "gbu_level_1": _s(s, "gbu_level_1"),
+        "reports_gbu_1": _s(s, "reports_gbu_level_1"),
+        "reports_gbu_2": _s(s, "reports_gbu_level_2"),
+        "reports_gbu_3": _s(s, "reports_gbu_level_3"),
+        "level_02": _s(s, "level_02_from_top"),
+        "level_03": _s(s, "level_03_from_top"),
+        "reports_level_02": _s(s, "reports_level_02"),
+        "reports_level_03": _s(s, "reports_level_03"),
+        "reports_level_04": _s(s, "reports_level_04"),
+        "job_unit": _s(s, "primary_function"),
+    }
+    kpi_suggestion = suggest_kpi_mapping(**kpi_fields)
+    kpi_mapping_search_text = get_kpi_mapping_search_text(**kpi_fields)
 
     return {
         "employee_code": s["employee_code"],
@@ -427,6 +549,7 @@ def get_manager_profile(
             KPI_MAPPING_LABELS.get(kpi_suggestion, "")
             if kpi_suggestion else ""
         ),
+        "kpi_mapping_search_text": kpi_mapping_search_text,
     }
 
 

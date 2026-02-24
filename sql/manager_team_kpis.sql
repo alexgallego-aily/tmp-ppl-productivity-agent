@@ -13,6 +13,7 @@ WITH base AS (
         pol.organization_level_code,
         pe.geo_code,
         pe.employee_code,
+        pe.management_level_code,
         pe.employee_age,
         pe.employee_gender,
         pe.employee_salary_uom,
@@ -26,7 +27,6 @@ WITH base AS (
         pe.has_no_candidate_for_replacement,
         pe.end_employment_date,
         pe.job_unit_code,
-        pe.management_level_code,
         pe.extra,
         ROUND(
             ((pe.snapshot_date - COALESCE(pe.continuous_hire_date, pe.hire_date))
@@ -178,7 +178,18 @@ SELECT
     ROUND(SUM(CASE WHEN e.is_manager THEN 1 ELSE 0 END)
           * 100.0 / COUNT(*), 1) AS pct_managers,
     ROUND(AVG(CASE WHEN e.is_manager AND e.employees_managed > 0
-                   THEN e.employees_managed END), 1) AS avg_span_of_control
+                   THEN e.employees_managed END), 1) AS avg_span_of_control,
+
+    -- 11. Management Level Composition (% per level)
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Exec Comm' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_exec_comm,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Exec Level 1' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_exec_level_1,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Exec Level 2' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_exec_level_2,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Level 1' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_level_1,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Level 2' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_level_2,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Level 3' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_level_3,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Level 4' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_level_4,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Level 5' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_level_5,
+    ROUND(SUM(CASE WHEN e.management_level_code = 'Local' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_local
 
 FROM base e
 LEFT JOIN rolling_exits r
